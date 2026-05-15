@@ -48,11 +48,13 @@ class TradingBot:
         self.account_value = self.starting_account_value
         self.day_start_value = self.account_value
         self.total_deposited = max(self.starting_account_value, Config.SIMULATED_ACCOUNT_SIZE)
+        # REALLOCATED: Using 100% of capital (was 50%) since options bot paused at micro-account size
+        self.trading_capital_allocation = 1.0  # 100% (will revisit at $2k+)
 
     def run_cycle(self):
         self.cycle_count += 1
         self.account_value = self.alpaca.get_portfolio_value()
-        self.trading_capital = self.account_value * 0.5
+        self.trading_capital = self.account_value * self.trading_capital_allocation  # 100% while options paused
         market_open = self.alpaca.get_market_status()
 
         if market_open != self.last_market_state:
