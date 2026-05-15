@@ -41,3 +41,12 @@ htmlcov/
 
 # Optional npm cache directory
 node_modules/
+
+# Personal/operational scripts and documentation
+SESSION_STATE.md
+pull-data.sh
+backup-to-onedrive.sh
+send_comparison.py
+*.backup
+rclone-config/
+
