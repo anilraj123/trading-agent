@@ -1,0 +1,30 @@
+services:
+  trading-agent:
+    build: .
+    container_name: trading-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./rclone-config:/root/.config/rclone
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  options-bot:
+    build: .
+    container_name: options-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: python -m options_bot
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

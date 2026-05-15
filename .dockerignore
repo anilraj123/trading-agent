@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+.git/
+backtest*.py
+*.log
+trading-agent-backup*
+rclone-config/

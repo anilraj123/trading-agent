@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Trading Agent
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/anilraj/trading-agent
+ExecStart=/home/anilraj/trading-agent/venv/bin/python -m trader
+Restart=on-failure
+RestartSec=30
+User=anilraj
+
+[Install]
+WantedBy=multi-user.target

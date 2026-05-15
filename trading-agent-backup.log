@@ -1,0 +1,81 @@
+2026/05/03 23:11:16 INFO  : backtest.py: Copied (new)
+2026/05/03 23:11:16 INFO  : .env.example: Copied (new)
+2026/05/03 23:11:16 INFO  : .env: Copied (new)
+2026/05/03 23:11:17 INFO  : backup-to-onedrive.sh: Copied (new)
+2026/05/03 23:11:18 INFO  : README.md: Copied (new)
+2026/05/03 23:11:18 INFO  : requirements.txt: Copied (new)
+2026/05/03 23:11:18 INFO  : README.txt: Copied (new)
+2026/05/03 23:11:18 INFO  : optimal_params.json: Copied (new)
+2026/05/03 23:11:19 INFO  : send_comparison.py: Copied (new)
+2026/05/03 23:11:20 INFO  : trading-agent.service: Copied (new)
+2026/05/03 23:11:21 INFO  : trader/config.py: Copied (new)
+2026/05/03 23:11:21 INFO  : trader/alpaca_client.py: Copied (new)
+2026/05/03 23:11:22 INFO  : trader/__main__.py: Copied (new)
+2026/05/03 23:11:22 INFO  : trader/__init__.py: Copied (new)
+2026/05/03 23:11:23 INFO  : trader/notifications.py: Copied (new)
+2026/05/03 23:11:23 INFO  : trader/llm_engine.py: Copied (new)
+2026/05/03 23:11:23 INFO  : trader/risk_manager.py: Copied (new)
+2026/05/03 23:11:24 INFO  : trader/stock_discovery.py: Copied (new)
+2026/05/03 23:11:24 INFO  : trader/technical_analysis.py: Copied (new)
+2026/05/03 23:11:25 INFO  : trader: Set directory modification time (using DirSetModTime)
+2026/05/03 23:11:25 INFO  : 
+Transferred:   	   72.482 KiB / 72.482 KiB, 100%, 6.589 KiB/s, ETA 0s
+Checks:                 0 / 0, -, Listed 22
+Transferred:           19 / 19, 100%
+Elapsed time:        11.8s
+
+2026/05/04 00:00:10 INFO  : There was nothing to transfer
+2026/05/04 00:00:10 INFO  : 
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Checks:                19 / 19, 100%, Listed 42
+Elapsed time:         1.8s
+
+2026/05/06 10:52:03 INFO  : .dockerignore: Copied (new)
+2026/05/06 10:52:03 INFO  : docker-compose.yml: Copied (new)
+2026/05/06 10:52:03 INFO  : auth-rclone.sh: Copied (new)
+2026/05/06 10:52:03 INFO  : deploy-digitalocean.sh: Copied (new)
+2026/05/06 10:52:04 INFO  : setup-cloud.sh: Copied (new)
+2026/05/06 10:52:04 INFO  : SESSION_STATE.md: Copied (new)
+2026/05/06 10:52:04 INFO  : Dockerfile: Copied (new)
+2026/05/06 10:52:04 INFO  : SETUP_DIGITALOCEAN.md: Copied (new)
+2026/05/06 10:52:05 INFO  : trader/alpaca_client.py: Copied (replaced existing)
+2026/05/06 10:52:05 INFO  : trader/technical_analysis.py: Copied (replaced existing)
+2026/05/06 10:52:05 INFO  : trader/__main__.py: Copied (replaced existing)
+2026/05/06 10:52:06 INFO  : trader: Set directory modification time (using SetModTime)
+2026/05/06 10:52:06 INFO  : 
+Transferred:   	   37.480 KiB / 37.480 KiB, 100%, 6.246 KiB/s, ETA 0s
+Checks:                19 / 19, 100%, Listed 50
+Transferred:           11 / 11, 100%
+Elapsed time:         6.8s
+
+2026/05/09 08:35:27 INFO  : There was nothing to transfer
+2026/05/09 08:35:27 INFO  : 
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Checks:                27 / 27, 100%, Listed 58
+Elapsed time:         1.4s
+
+2026/05/10 10:36:14 INFO  : SESSION_STATE.md: Copied (replaced existing)
+2026/05/10 10:36:14 INFO  : trader/__main__.py: Copied (replaced existing)
+2026/05/10 10:36:14 INFO  : trader/alpaca_client.py: Copied (replaced existing)
+2026/05/10 10:36:14 INFO  : .env: Copied (replaced existing)
+2026/05/10 10:36:15 INFO  : trader/config.py: Copied (replaced existing)
+2026/05/10 10:36:15 INFO  : trader/risk_manager.py: Copied (replaced existing)
+2026/05/10 10:36:15 INFO  : trader/notifications.py: Copied (replaced existing)
+2026/05/10 10:36:15 INFO  : trader/stock_discovery.py: Copied (replaced existing)
+2026/05/10 10:36:16 INFO  : trader: Set directory modification time (using SetModTime)
+2026/05/10 10:36:16 INFO  : 
+Transferred:   	   39.973 KiB / 39.973 KiB, 100%, 8.211 KiB/s, ETA 0s
+Checks:                27 / 27, 100%, Listed 58
+Transferred:            8 / 8, 100%
+Elapsed time:         4.0s
+
+2026/05/11 06:27:10 INFO  : .env: Copied (replaced existing)
+2026/05/11 06:27:10 INFO  : trader/llm_engine.py: Copied (replaced existing)
+2026/05/11 06:27:10 INFO  : trader/__main__.py: Copied (replaced existing)
+2026/05/11 06:27:11 INFO  : trader: Set directory modification time (using SetModTime)
+2026/05/11 06:27:11 INFO  : 
+Transferred:   	   20.865 KiB / 20.865 KiB, 100%, 6.954 KiB/s, ETA 0s
+Checks:                27 / 27, 100%, Listed 58
+Transferred:            3 / 3, 100%
+Elapsed time:         4.1s
+
