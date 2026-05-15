@@ -1,6 +1,8 @@
 import logging
 import time
 import schedule
+import csv
+import os
 from datetime import datetime, timedelta
 from alpaca.trading.enums import OrderSide
 from rich.console import Console
@@ -48,11 +50,65 @@ class TradingBot:
         self.account_value = self.starting_account_value
         self.day_start_value = self.account_value
         self.total_deposited = max(self.starting_account_value, Config.SIMULATED_ACCOUNT_SIZE)
+        # REALLOCATED: Using 100% of capital (was 50%) since options bot paused at micro-account size
+        self.trading_capital_allocation = 1.0  # 100% (will revisit at $2k+)
+        
+        # NEW: Track deposits separately from trading P&L
+        self.known_deposits = self._load_deposits_csv()
+        self.total_known_deposits = sum(self.known_deposits)
+        self.last_equity_check = self.starting_account_value
+        self.unplanned_deposits = 0.0
+        logger.info(f"Deposits loaded: ${self.total_known_deposits:.2f} known, monitoring for new deposits")
+    
+    def _load_deposits_csv(self):
+        """Load known deposits from deposits.csv."""
+        deposits = []
+        deposits_file = "/app/data/deposits.csv"
+        if not os.path.exists(deposits_file):
+            logger.warning("deposits.csv not found, assuming no prior deposits")
+            return deposits
+        try:
+            with open(deposits_file) as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    deposits.append(float(row["amount"]))
+            logger.info(f"Loaded {len(deposits)} deposits from CSV: ${sum(deposits):.2f} total")
+        except Exception as e:
+            logger.error(f"Failed to load deposits.csv: {e}")
+        return deposits
+    
+    def _append_to_deposits_csv(self, amount):
+        """Append detected deposit to deposits.csv."""
+        deposits_file = "/app/data/deposits.csv"
+        try:
+            with open(deposits_file, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([datetime.now().strftime("%Y-%m-%d"), f"{amount:.2f}", "Auto-detected deposit"])
+            logger.info(f"Appended ${amount:.2f} to deposits.csv")
+        except Exception as e:
+            logger.error(f"Failed to append to deposits.csv: {e}")
 
     def run_cycle(self):
         self.cycle_count += 1
-        self.account_value = self.alpaca.get_portfolio_value()
-        self.trading_capital = self.account_value * 0.5
+        current_equity = self.alpaca.get_portfolio_value()
+        
+        # DEPOSIT DETECTION: Check for unexpected equity changes
+        equity_change = current_equity - self.last_equity_check
+        expected_change = self.risk.total_realized_pnl if hasattr(self, 'risk') else 0
+        unexpected_change = equity_change - expected_change
+        
+        if unexpected_change > 1.0:  # $1 threshold to avoid noise
+            self.unplanned_deposits += unexpected_change
+            logger.warning(f"DEPOSIT DETECTED: ${unexpected_change:.2f} (total unplanned: ${self.unplanned_deposits:.2f})")
+            # Update deposits.csv with new deposit
+            self._append_to_deposits_csv(unexpected_change)
+        
+        self.last_equity_check = current_equity
+        
+        # Calculate true trading capital (excluding deposits)
+        total_deposits = self.total_known_deposits + self.unplanned_deposits
+        self.account_value = current_equity - total_deposits  # True trading equity
+        self.trading_capital = self.account_value * self.trading_capital_allocation  # 100% while options paused
         market_open = self.alpaca.get_market_status()
 
         if market_open != self.last_market_state:
@@ -143,12 +199,17 @@ class TradingBot:
 
         try:
             current_value = self.alpaca.get_portfolio_value()
+            
+            # Calculate true returns (excluding deposits)
+            total_deposits = self.total_known_deposits + self.unplanned_deposits
+            true_trading_pnl = current_value - self.starting_account_value - total_deposits
+            true_return_pct = (true_trading_pnl / max(self.starting_account_value, 1)) * 100
             total_return_pct = ((current_value / self.starting_account_value) - 1) * 100
+            
             days_elapsed = (datetime.now() - self.start_date).days
-            trading_days = max(1, int(days_elapsed * 5 / 7))
 
-            if days_elapsed > 0:
-                apy = ((current_value / self.starting_account_value) ** (365 / max(1, days_elapsed)) - 1) * 100
+            if days_elapsed > 0 and true_return_pct != 0:
+                apy = ((1 + true_return_pct / 100) ** (365 / max(1, days_elapsed)) - 1) * 100
             else:
                 apy = 0
 
@@ -170,7 +231,7 @@ class TradingBot:
             losses = len([t for t in self.risk.trade_log if t.get('pnl', 0) < 0])
             daily_pnl = current_value - self.day_start_value
 
-            save_daily_snapshot("trading", self.day_start_value, current_value, daily_pnl, self.risk.daily_trades, wins, losses)
+            save_daily_snapshot("trading", self.day_start_value, current_value, daily_pnl, self.risk.daily_trades, wins, losses, total_deposited=total_deposits)
 
             if today.weekday() == 4:  # Friday
                 weekly = generate_weekly_summary()
@@ -179,8 +240,8 @@ class TradingBot:
 
             self.notif.send(
                 f"DAILY SUMMARY - {today.strftime('%b %d')}\n"
-                f"Portfolio: ${current_value:.2f} (started ${self.starting_account_value:.0f})\n"
-                f"Total Return: {total_return_pct:+.2f}% | APY: {apy:+.2f}%\n"
+                f"Portfolio: ${current_value:.2f}\n"
+                f"Deposits: ${total_deposits:.2f} | Trading P&L: ${true_trading_pnl:+.2f} | Return: {true_return_pct:+.2f}% | APY: {apy:+.2f}%\n"
                 f"Open Positions: {pos_count}\n"
                 f"Today's Trades: {self.risk.daily_trades} (W:{wins}/L:{losses})\n"
                 f"Day P&L: ${daily_pnl:+.2f}\n"
