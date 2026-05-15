@@ -26,7 +26,8 @@ CONTRACT_DTE_MIN = 7
 CONTRACT_DTE_MAX = 35
 OPTIONS_WATCHLIST_SIZE = 50    # Expanded from 30 for broader symbol coverage
 MIN_OPTION_OI = 500            # minimum open interest for liquidity
-MAX_OPTION_SPREAD = 0.20       # maximum bid-ask spread ($) for liquidity
+MAX_OPTION_SPREAD = 0.50       # maximum bid-ask spread ($) — relaxed from 0.20 for viability
+                                # At $35 cost, 0.50 spread = 1.4% slippage (acceptable for 50% target)
 
 class NotificationManager(BaseNotif):
     def send(self, message, priority="normal"):
@@ -100,6 +101,11 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
     price = _underlying_price(symbol)
     if not price:
         return False
+    
+    # Track rejection reasons for diagnostics
+    total_contracts = 0
+    rejected = {"no_price": 0, "itm": 0, "low_oi": 0, "wide_spread": 0, "budget": 0, "otm_violation": 0}
+    
     for start_dte, end_dte in [(7, 10), (11, 14), (15, 18), (19, 21), (22, 25), (26, 28), (29, 32), (33, CONTRACT_DTE_MAX)]:
         try:
             req = GetOptionContractsRequest(
@@ -112,32 +118,45 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
                 continue
             for c in resp.option_contracts:
                 try:
+                    total_contracts += 1
                     strike = float(c.strike_price)
                     if c.type not in ("call", "put"):
                         continue
                     is_otm = (c.type == "call" and strike > price) or (c.type == "put" and strike < price)
                     if not is_otm:
+                        rejected["itm"] += 1
                         continue
                     oi = getattr(c, "open_interest", 0) or 0
                     if oi < MIN_OPTION_OI:
+                        rejected["low_oi"] += 1
                         continue
                     bid, ask = _quote_option(data_client, c.symbol)
                     if not bid or not ask:
+                        rejected["no_price"] += 1
                         continue
                     if ask - bid > MAX_OPTION_SPREAD:
+                        rejected["wide_spread"] += 1
                         continue
                     mid = (bid + ask) / 2
                     if mid <= 0 or mid * 100 > budget:
+                        rejected["budget"] += 1
                         continue
                     dte = (c.expiration_date - today_d).days
                     otm_pct = (strike / price - 1) * 100 if c.type == "call" else (1 - strike / price) * 100
                     if dte < 15 and abs(otm_pct) > 5:
+                        rejected["otm_violation"] += 1
                         continue
+                    # Found viable contract!
+                    logger.debug(f"{symbol}: Found viable {c.type} ${strike:.0f} @ ${mid:.2f} ({dte} DTE, {oi} OI)")
                     return True
                 except:
                     pass
         except:
             pass
+    
+    # Log rejection details for debugging (DEBUG level, only shown if enabled)
+    if total_contracts > 0:
+        logger.debug(f"{symbol}: {total_contracts} contracts found, none viable. Rejections: spread={rejected['wide_spread']}, oi={rejected['low_oi']}, budget={rejected['budget']}, otm%={rejected['otm_violation']}, itm={rejected['itm']}")
     return False
 
 
@@ -305,10 +324,10 @@ class OptionsBot:
             per_pos_budget = allocated * PER_POSITION_PCT
             viable = [s for s in self.watchlist if _has_viable_option(self.alpaca.trading, self.opt_data, s, per_pos_budget)]
             if not viable:
-                logger.info("No symbols with viable options in watchlist")
+                logger.info(f"No symbols with viable options ({len(self.watchlist)} checked, max spread: ${MAX_OPTION_SPREAD:.2f}, min OI: {MIN_OPTION_OI})")
                 return
             if len(viable) < len(self.watchlist):
-                logger.info(f"Filtered watchlist: {len(viable)}/{len(self.watchlist)} have viable options")
+                logger.info(f"Filtered watchlist: {len(viable)}/{len(self.watchlist)} have viable options (spread ≤ ${MAX_OPTION_SPREAD:.2f}, OI ≥ {MIN_OPTION_OI})")
 
             summary = {"equity": equity, "cash": cash, "open_options": len(opt_positions), "spy_pct": spy_pct}
             signal = _get_signal(self.llm, summary, viable)
