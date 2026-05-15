@@ -25,9 +25,19 @@ TARGET_GAIN_PCT = 50
 CONTRACT_DTE_MIN = 7
 CONTRACT_DTE_MAX = 35
 OPTIONS_WATCHLIST_SIZE = 50    # Expanded from 30 for broader symbol coverage
-MIN_OPTION_OI = 500            # minimum open interest for liquidity
-MAX_OPTION_SPREAD = 0.50       # maximum bid-ask spread ($) — relaxed from 0.20 for viability
-                                # At $35 cost, 0.50 spread = 1.4% slippage (acceptable for 50% target)
+
+# Liquidity guardrails (tiered approach)
+# Tier 1 (strict): Maximum quality, lowest slippage
+MIN_OPTION_OI_TIER1 = 500
+MAX_OPTION_SPREAD_TIER1 = 0.20
+
+# Tier 2 (relaxed): Balance of quality vs availability
+MIN_OPTION_OI_TIER2 = 200
+MAX_OPTION_SPREAD_TIER2 = 0.50
+
+# Currently using Tier 2 (0.50 spread, 200+ OI) for better viability
+MIN_OPTION_OI = MIN_OPTION_OI_TIER2
+MAX_OPTION_SPREAD = MAX_OPTION_SPREAD_TIER2
 
 class NotificationManager(BaseNotif):
     def send(self, message, priority="normal"):
