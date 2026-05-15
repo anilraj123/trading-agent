@@ -24,7 +24,7 @@ TOTAL_DEPLOYED_PCT = 0.50      # 50% of allocated total cap
 TARGET_GAIN_PCT = 50
 CONTRACT_DTE_MIN = 7
 CONTRACT_DTE_MAX = 35
-OPTIONS_WATCHLIST_SIZE = 30
+OPTIONS_WATCHLIST_SIZE = 50    # Expanded from 30 for broader symbol coverage
 MIN_OPTION_OI = 500            # minimum open interest for liquidity
 MAX_OPTION_SPREAD = 0.20       # maximum bid-ask spread ($) for liquidity
 
@@ -237,8 +237,10 @@ class OptionsBot:
         if self.last_discovery and (now - self.last_discovery).seconds < 3600:
             return self.watchlist
         try:
+            # Start with trending stocks (dynamic discovery) for fresh market signals
             trending = self.discovery.discover_trending_stocks()
             pool = list(dict.fromkeys(t for t in trending if t.upper() not in Config.BLACKLIST))
+            # Fill remainder with core universe for stability (ensures 50-stock coverage)
             for s in UNIVERSE_100:
                 if len(pool) >= OPTIONS_WATCHLIST_SIZE:
                     break
@@ -246,7 +248,7 @@ class OptionsBot:
                     pool.append(s)
             self.watchlist = pool[:OPTIONS_WATCHLIST_SIZE]
             self.last_discovery = now
-            logger.info(f"Options watchlist refreshed: {len(self.watchlist)} stocks")
+            logger.info(f"Options watchlist refreshed: {len(self.watchlist)} stocks (trending+core universe)")
         except Exception as e:
             logger.warning(f"Watchlist refresh failed: {e}")
         return self.watchlist

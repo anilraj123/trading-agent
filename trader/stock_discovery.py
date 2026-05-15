@@ -49,13 +49,13 @@ class StockDiscovery:
                 logger.warning(f"{source.__name__} failed: {e}")
 
         stocks = {s for s in stocks if s not in Config.BLACKLIST}
-        final_list = list(stocks)[:100]
+        final_list = list(stocks)[:150]  # Increased from 100 to 150 for better diversity in 50-stock watchlist
         self.discovered_stocks = final_list
 
         from datetime import datetime
         self.last_discovery_time = datetime.now()
 
-        logger.info(f"Stock universe updated: {len(final_list)} stocks")
+        logger.info(f"Stock universe updated: {len(final_list)} stocks (trending + core)")
         return final_list
 
     def _get_yahoo_gainers(self) -> List[str]:
@@ -82,7 +82,7 @@ class StockDiscovery:
                             stocks.append(parts.upper())
         except:
             pass
-        return list(set(stocks))[:30]
+        return list(set(stocks))[:50]  # Increased from 30 to 50 per source
 
     def _get_marketwatch_movers(self) -> List[str]:
         stocks = []
@@ -101,4 +101,4 @@ class StockDiscovery:
                             stocks.append(symbol.upper())
         except:
             pass
-        return list(set(stocks))[:20]
+        return list(set(stocks))[:50]  # Increased from 20 to 50
