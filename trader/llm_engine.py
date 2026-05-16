@@ -94,31 +94,33 @@ class LLMEngine:
             )
             return response.choices[0].message.content.strip()
 
-    def get_trading_decision(self, portfolio_data: dict, account_value: float = None) -> dict:
+    def get_trading_decision(self, portfolio_data: dict, account_value: float = None) -> tuple:
         system_prompt = _build_system_prompt(account_value)
         user_prompt = self._build_prompt(portfolio_data, account_value)
+        combined_prompt = f"SYSTEM:\n{system_prompt}\n\nUSER:\n{user_prompt}"
 
-        content = self.call(
+        raw_response = self.call(
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}]
         )
 
         try:
-            start = content.find("{")
-            end = content.rfind("}")
+            parsed = raw_response
+            start = parsed.find("{")
+            end = parsed.rfind("}")
             if start != -1 and end != -1 and end > start:
-                content = content[start:end+1]
-            decision = json.loads(content)
+                parsed = parsed[start:end+1]
+            decision = json.loads(parsed)
             logger.info(f"LLM decision: {decision.get('market_outlook')} - {decision.get('summary')}")
-            return decision
+            return decision, combined_prompt, raw_response
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response: {content[:200]}")
+            logger.error(f"Failed to parse LLM response: {raw_response[:200]}")
             return {
                 "decisions": [],
                 "market_outlook": "neutral",
                 "summary": "Error parsing AI response",
                 "error": str(e)
-            }
+            }, combined_prompt, raw_response
 
     def _build_prompt(self, portfolio: dict, account_value: float = None) -> str:
         ta_data = portfolio.get("technical_analysis", {})

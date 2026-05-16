@@ -47,6 +47,15 @@ class Config:
     NOTIFY_WHATSAPP_PHONE = os.getenv("NOTIFY_WHATSAPP_PHONE", "")
     NOTIFY_NTFY_TOPIC = os.getenv("NOTIFY_NTFY_TOPIC", "trading-agent")
 
+    EMAIL_ENABLED = os.getenv("EMAIL_ENABLED", "false").lower() == "true"
+    EMAIL_SMTP_HOST = os.getenv("EMAIL_SMTP_HOST", "smtp-mail.outlook.com")
+    EMAIL_SMTP_PORT = int(os.getenv("EMAIL_SMTP_PORT", "587"))
+    EMAIL_USER = os.getenv("EMAIL_USER", "")
+    EMAIL_PASS = os.getenv("EMAIL_PASS", "")
+    EMAIL_TO = os.getenv("EMAIL_TO", "")
+    EMAIL_FROM = os.getenv("EMAIL_FROM", "")
+    EMAIL_API_KEY = os.getenv("EMAIL_API_KEY", "")
+
     @staticmethod
     def get_notification_config() -> dict:
         if Config.NOTIFY_PROVIDER == "whatsapp":

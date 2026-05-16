@@ -16,7 +16,8 @@ from .risk_manager import RiskManager
 from .technical_analysis import TechnicalAnalysis
 from .stock_discovery import StockDiscovery
 from .notifications import NotificationManager
-from .tracker import save_daily_snapshot, save_trade, generate_weekly_summary
+from .tracker import save_daily_snapshot, save_trade, save_discovery_snapshot, generate_weekly_summary
+from .email_notifier import EmailNotifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +40,7 @@ class TradingBot:
             provider=Config.NOTIFY_PROVIDER,
             config=Config.get_notification_config()
         )
+        self.email_notifier = EmailNotifier()
         self.running = False
         self.watchlist = list(self.discovery.discovered_stocks)
         self.last_market_state = False
@@ -97,7 +99,7 @@ class TradingBot:
         expected_change = self.risk.total_realized_pnl if hasattr(self, 'risk') else 0
         unexpected_change = equity_change - expected_change
         
-        if unexpected_change > 1.0:  # $1 threshold to avoid noise
+        if unexpected_change > 5.0:  # $5 threshold to avoid noise from unrealized P&L swings
             self.unplanned_deposits += unexpected_change
             logger.warning(f"DEPOSIT DETECTED: ${unexpected_change:.2f} (total unplanned: ${self.unplanned_deposits:.2f})")
             # Update deposits.csv with new deposit
@@ -134,6 +136,13 @@ class TradingBot:
                 self.watchlist = new_stocks
                 logger.info(f"Discovered {len(new_stocks)} stocks for watchlist")
                 self.notif.send(f"Stock universe refreshed: {len(new_stocks)} stocks loaded")
+                save_discovery_snapshot(
+                    len(new_stocks),
+                    len(self.discovery.discovered_stocks) if hasattr(self.discovery, 'discovered_stocks') else 0,
+                    len(self.discovery.last_gainers) if hasattr(self.discovery, 'last_gainers') and self.discovery.last_gainers else 0,
+                    len(self.discovery.last_losers) if hasattr(self.discovery, 'last_losers') and self.discovery.last_losers else 0,
+                    len(self.discovery.last_active) if hasattr(self.discovery, 'last_active') and self.discovery.last_active else 0,
+                )
 
             portfolio = self._gather_portfolio_data()
             positions = self.alpaca.get_positions()
@@ -170,10 +179,17 @@ class TradingBot:
                 save_trade("trading", sym, "EXPIRY CLOSE", qty, entry_price=entry_p, exit_price=curr_p, pnl_pct=pnl_pct, pnl_dollars=dollar_pnl)
                 self.notif.send(f"Expired: sold {sym} after {Config.RISK_MAX_HOLDING_DAYS} days (PnL: {pnl_pct:+.2f}%)")
 
-            decisions = self.llm.get_trading_decision(portfolio, account_value=self.trading_capital)
+            decisions, llm_prompt, llm_response = self.llm.get_trading_decision(portfolio, account_value=self.trading_capital)
             if "error" in decisions:
                 self.notif.send(f"LLM parse error: {decisions.get('summary')}", priority="high")
-            self._execute_decisions(decisions, portfolio)
+            actions_taken = self._execute_decisions(decisions, portfolio)
+            self.email_notifier.send_llm_report(
+                system_prompt=llm_prompt.split("USER:\n", 1)[0].replace("SYSTEM:\n", ""),
+                user_prompt=llm_prompt.split("USER:\n", 1)[1] if "USER:\n" in llm_prompt else llm_prompt,
+                raw_response=llm_response,
+                decisions=decisions,
+                actions_taken=actions_taken
+            )
 
             self._print_status(portfolio)
 
@@ -225,7 +241,8 @@ class TradingBot:
                 spy_value = self.starting_account_value * (1 + spy_return_pct / 100)
 
             edge = apy - spy_apy
-            pos_count = len(self.alpaca.get_positions())
+            raw_positions = self.alpaca.get_positions()
+            pos_count = len(raw_positions)
 
             wins = len([t for t in self.risk.trade_log if t.get('pnl', 0) >= 0])
             losses = len([t for t in self.risk.trade_log if t.get('pnl', 0) < 0])
@@ -233,10 +250,26 @@ class TradingBot:
 
             save_daily_snapshot("trading", self.day_start_value, current_value, daily_pnl, self.risk.daily_trades, wins, losses, total_deposited=total_deposits)
 
+            positions_dict = [
+                {"symbol": p.symbol, "qty": float(p.qty), "market_value": float(p.market_value),
+                 "avg_entry_price": float(p.avg_entry_price), "unrealized_pl": float(p.unrealized_pl)}
+                for p in raw_positions
+            ]
+
             if today.weekday() == 4:  # Friday
                 weekly = generate_weekly_summary()
                 if weekly:
                     self.notif.send(weekly, priority="low")
+                    self.email_notifier.send_weekly_report(
+                        total_deposits, self.starting_account_value, current_value,
+                        self.risk.trade_log, true_trading_pnl
+                    )
+
+            self.email_notifier.send_daily_report(
+                self.day_start_value, current_value, daily_pnl, total_deposits,
+                true_trading_pnl, self.risk.daily_trades, wins, losses,
+                positions_dict, spy_return_pct, apy, spy_apy
+            )
 
             self.notif.send(
                 f"DAILY SUMMARY - {today.strftime('%b %d')}\n"
@@ -287,8 +320,9 @@ class TradingBot:
             "trades_today": self.risk.daily_trades
         }
 
-    def _execute_decisions(self, decisions: dict, portfolio: dict):
+    def _execute_decisions(self, decisions: dict, portfolio: dict) -> list:
         total_deployed = sum(p["market_value"] for p in portfolio["positions"])
+        action_results = []
 
         for decision in decisions.get("decisions", []):
             symbol = decision.get("symbol")
@@ -301,11 +335,13 @@ class TradingBot:
 
             if symbol.upper() in Config.BLACKLIST:
                 logger.info(f"Skipping {symbol} - blacklisted")
+                action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": 0, "status": "rejected", "reason": "Blacklisted"})
                 continue
 
             price = self.alpaca.get_latest_price(symbol)
             if not price:
                 logger.warning(f"No price data for {symbol}")
+                action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": 0, "status": "rejected", "reason": "No price data"})
                 continue
 
             decision["current_price"] = price
@@ -318,16 +354,18 @@ class TradingBot:
 
             if action == "BUY" and quantity > 0:
                 if total_deployed >= self.trading_capital:
-                    logger.info(f"Rejecting BUY {symbol}: total deployed ${total_deployed:.2f} >= 50% cap (${self.trading_capital:.2f})")
+                    logger.info(f"Rejecting BUY {symbol}: total deployed ${total_deployed:.2f} >= capital cap (${self.trading_capital:.2f})")
+                    action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": f"Capital cap (${self.trading_capital:.2f}) exceeded"})
                     continue
                 max_shares = (self.trading_capital * Config.RISK_MAX_POSITION_PCT) / price
                 cost = quantity * price
                 if total_deployed + cost > self.trading_capital:
                     allowed = (self.trading_capital - total_deployed) / price
                     if allowed < 0.001:
-                        logger.info(f"Rejecting BUY {symbol}: no room under 50% cap")
+                        logger.info(f"Rejecting BUY {symbol}: no room under capital cap")
+                        action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "No room under capital cap"})
                         continue
-                    logger.info(f"Capping {symbol} from ${cost:.2f} to ${allowed * price:.2f} (50% cap)")
+                    logger.info(f"Capping {symbol} from ${cost:.2f} to ${allowed * price:.2f} (capital cap)")
                     quantity = allowed
                     decision["quantity"] = quantity
                 if quantity > max_shares:
@@ -347,6 +385,7 @@ class TradingBot:
 
             if not approved:
                 logger.info(f"Rejected {action} {symbol} ({strategy}): {reason}")
+                action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": reason})
                 continue
 
             try:
@@ -360,6 +399,7 @@ class TradingBot:
                     self.notif.notify_trade("BUY", symbol, quantity, price)
                     save_trade("trading", symbol, "BUY", quantity, entry_price=price, strategy=strategy, reason=decision.get("reasoning"))
                     logger.info(f"BUY {quantity} {symbol} @ ${price:.2f} [{strategy}] stop=${stop_loss_price:.2f}{' [bracket]' if use_bracket else ' [software stop]'}")
+                    action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "executed", "reason": f"stop={stop_loss_price:.2f} bracket={use_bracket}"})
 
                 elif action == "SELL" and quantity > 0:
                     self.alpaca.submit_market_order(symbol, OrderSide.SELL, quantity)
@@ -374,9 +414,13 @@ class TradingBot:
                         save_trade("trading", symbol, "SELL", quantity, exit_price=price, strategy=strategy, stop_type="llm_signal")
                     self.notif.notify_trade("SELL", symbol, quantity, price)
                     logger.info(f"SELL {quantity} {symbol} @ ${price:.2f} [{strategy}]")
+                    action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "executed", "reason": f"pnl={pnl_pct:+.2f}%" if entry_price else ""})
 
             except Exception as e:
                 logger.error(f"Order failed for {symbol}: {e}")
+                action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "failed", "reason": str(e)})
+
+        return action_results
 
     def _print_status(self, portfolio: dict):
         risk_status = self.risk.get_status(portfolio['total_value'])
