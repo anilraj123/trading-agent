@@ -321,7 +321,6 @@ class TradingBot:
         }
 
     def _execute_decisions(self, decisions: dict, portfolio: dict) -> list:
-        total_deployed = sum(p["market_value"] for p in portfolio["positions"])
         action_results = []
 
         for decision in decisions.get("decisions", []):
@@ -353,26 +352,25 @@ class TradingBot:
                 logger.info(f"Lifted {symbol} qty to ${quantity * price:.0f} min notional (${MIN_NOTIONAL})")
 
             if action == "BUY" and quantity > 0:
-                if total_deployed >= self.trading_capital:
-                    logger.info(f"Rejecting BUY {symbol}: total deployed ${total_deployed:.2f} >= capital cap (${self.trading_capital:.2f})")
-                    action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": f"Capital cap (${self.trading_capital:.2f}) exceeded"})
-                    continue
-                max_shares = (self.trading_capital * Config.RISK_MAX_POSITION_PCT) / price
+                available_cash = portfolio["cash"]
+                max_position_value = self.account_value * Config.RISK_MAX_POSITION_PCT
                 cost = quantity * price
-                if total_deployed + cost > self.trading_capital:
-                    allowed = (self.trading_capital - total_deployed) / price
-                    if allowed < 0.001:
-                        logger.info(f"Rejecting BUY {symbol}: no room under capital cap")
-                        action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "No room under capital cap"})
+
+                if cost > available_cash:
+                    capped_qty = available_cash / price
+                    if capped_qty < 0.001:
+                        logger.info(f"Rejecting BUY {symbol}: no cash (${available_cash:.2f})")
+                        action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "No cash available"})
                         continue
-                    logger.info(f"Capping {symbol} from ${cost:.2f} to ${allowed * price:.2f} (capital cap)")
-                    quantity = allowed
+                    logger.info(f"Capping {symbol} from ${cost:.2f} to ${capped_qty * price:.2f} (cash limit)")
+                    quantity = capped_qty
                     decision["quantity"] = quantity
-                if quantity > max_shares:
-                    logger.info(f"Capping {symbol} from {quantity} to {max_shares:.4f} shares (max ${self.trading_capital * Config.RISK_MAX_POSITION_PCT:.0f} position)")
-                    quantity = max_shares
+
+                if cost > max_position_value:
+                    max_qty = max_position_value / price
+                    logger.info(f"Capping {symbol} from {quantity} to {max_qty:.4f} (max ${max_position_value:.0f} position)")
+                    quantity = max_qty
                     decision["quantity"] = quantity
-                total_deployed += quantity * price
 
             entry_price = None
             if action == "SELL" and symbol in self.risk.positions:
