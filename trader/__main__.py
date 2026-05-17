@@ -52,8 +52,8 @@ class TradingBot:
         self.account_value = self.starting_account_value
         self.day_start_value = self.account_value
         self.total_deposited = max(self.starting_account_value, Config.SIMULATED_ACCOUNT_SIZE)
-        # REALLOCATED: Using 100% of capital (was 50%) since options bot paused at micro-account size
-        self.trading_capital_allocation = 1.0  # 100% (will revisit at $2k+)
+        # REALLOCATED: 60% to trading, 40% to options (restarted at ~$1.7k equity)
+        self.trading_capital_allocation = 0.60  # 60% trading, 40% options
         
         # NEW: Track deposits separately from trading P&L
         self.known_deposits = self._load_deposits_csv()
