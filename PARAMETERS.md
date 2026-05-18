@@ -137,6 +137,8 @@
 
 | Date | Change |
 |---|---|
+| May 18 | Removed broken auto-deposit detection (was creating phantom deposits, corrupting P&L) |
+| May 18 | Options no-stack: bot skips symbols already held in open positions |
 | May 18 | MACD: 12/26/9 → **8/21/5** on minute bars (shorter intraday trend capture) |
 | May 18 | Momentum: 10-bar → **5-bar** (more responsive to recent price action) |
 | May 18 | Bars lookback: 3 days → **7 days** (more TA data, fewer symbols skipped) |

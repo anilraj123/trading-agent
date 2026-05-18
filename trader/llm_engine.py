@@ -14,11 +14,11 @@ def _build_system_prompt(account_value: float = None) -> str:
 
     return f"""You are an expert AI stock trading assistant. You analyze market data using TECHNICAL ANALYSIS and make precise trading decisions.
 
-TIMEFRAME: Intraday (15-minute bar intervals). All indicators below are computed from minute-level bars.
-- RSI(14) = 14-bar rolling RSI (≈3.5 hours of data)
-- MACD = standard MACD on 15-min bars (≈2-3 hours of trend)
-- Momentum(10) = % change over last 10 bars (≈2.5 hours)
-- Volume = 15-min bar volume vs 20-bar average
+TIMEFRAME: Intraday (minute-bar intervals). All indicators computed from 1-minute bars.
+- RSI(14) = 14-bar rolling RSI (≈14 minutes of data)
+- MACD(8/21/5) = fast/slow/signal on minute bars (≈21-minute trend)
+- Momentum(5) = % change over last 5 bars (≈5 minutes)
+- Volume = minute-bar volume vs 20-bar average
 
 ACTIVE STRATEGY CONFIG:
 
@@ -26,7 +26,7 @@ BUY SIGNALS (Score >= {Config.TA_MIN_BUY_SCORE}):
 - RSI(14) below {Config.TA_RSI_OVERSOLD} = oversold bounce (+{Config.TA_RSI_WEIGHT} points)
 - MACD histogram turning positive = momentum shift (+{Config.TA_MACD_WEIGHT} points)
 - Price at/near Bollinger Band lower edge (+{Config.TA_BB_WEIGHT} points)
-- Positive momentum over last 10 bars (+{Config.TA_MOM_WEIGHT} points)
+- Positive momentum over last 5 bars (+{Config.TA_MOM_WEIGHT} points)
 - Volume {Config.TA_VOL_THRESHOLD}x above average → score boosted by {Config.TA_VOL_BOOST}x
 - Trend alignment (SMA 10 vs 20) (+{Config.TA_TREND_WEIGHT} points)
 
@@ -34,7 +34,7 @@ SELL SIGNALS (Score >= {Config.TA_MIN_SELL_SCORE}):
 - RSI(14) above {Config.TA_RSI_OVERBOUGHT} = take profits (+{Config.TA_RSI_WEIGHT} points)
 - MACD histogram turning negative = momentum loss (+{Config.TA_MACD_WEIGHT} points)
 - Price at/near Bollinger Band upper edge (+{Config.TA_BB_WEIGHT} points)
-- Negative momentum over last 10 bars (+{Config.TA_MOM_WEIGHT} points)
+- Negative momentum over last 5 bars (+{Config.TA_MOM_WEIGHT} points)
 
 RISK RULES:
 - ${account_value:.0f} account. Max {Config.RISK_MAX_POSITION_PCT:.0%} (${max_pos:.0f}) per trade.
@@ -137,7 +137,7 @@ class LLMEngine:
                     "sma_20": data.get("sma_20"),
                     "sma_50": data.get("sma_50"),
                     "bollinger": data.get("bollinger_bands"),
-                    "momentum_10": data.get("momentum_10"),
+                    "momentum_5": data.get("momentum_5"),
                     "volume": data.get("volume"),
                     "buy_score": score.get("buy_score", 0),
                     "sell_score": score.get("sell_score", 0),
@@ -162,7 +162,7 @@ DECISION RULES:
 2. SELL when sell_score >= {Config.TA_MIN_SELL_SCORE} (RSI > {Config.TA_RSI_OVERBOUGHT} + confirmations)
 3. Use stop loss at {Config.TA_STOP_LOSS_PCT:.0%} from entry price
 4. Position size max ${account_value * Config.RISK_MAX_POSITION_PCT:.0f} ({Config.RISK_MAX_POSITION_PCT:.0%} of account)
-5. All indicators are on 15-minute bars — momentum_10 = % change over ~2.5 hours
+5. All indicators are on 1-minute bars — MACD(8/21/5) captures ~21-min trends, momentum(5) ~5 min
 6. Only trade stocks with clear technical signals
 
 The buy_score and sell_score are pre-computed using the config weights. Use them as ground truth for your decisions.
