@@ -13,7 +13,7 @@ class TechnicalAnalysis:
         return round(100 - (100 / (1 + rs.iloc[-1])), 2) if pd.notna(rs.iloc[-1]) else 50.0
 
     @staticmethod
-    def macd(close_prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
+    def macd(close_prices: pd.Series, fast: int = 8, slow: int = 21, signal: int = 5) -> dict:
         ema_fast = close_prices.ewm(span=fast, adjust=False).mean()
         ema_slow = close_prices.ewm(span=slow, adjust=False).mean()
         macd_line = ema_fast - ema_slow
@@ -82,7 +82,7 @@ class TechnicalAnalysis:
         }
 
     @staticmethod
-    def momentum(close_prices: pd.Series, period: int = 10) -> float:
+    def momentum(close_prices: pd.Series, period: int = 5) -> float:
         return round(((close_prices.iloc[-1] / close_prices.iloc[-period] - 1) * 100), 2) if len(close_prices) >= period else 0.0
 
     @staticmethod
@@ -140,7 +140,7 @@ class TechnicalAnalysis:
         components["trend_buy"] = trend_buy * Config.TA_TREND_WEIGHT
         components["trend_sell"] = trend_sell * Config.TA_TREND_WEIGHT
 
-        mom = ta_data.get("momentum_10", 0.0)
+        mom = ta_data.get("momentum_5", 0.0)
         mom_thresh = Config.TA_MOM_THRESHOLD
         if mom > mom_thresh:
             mom_buy_grade = max(0.0, min(1.0, (mom - mom_thresh) / mom_thresh))
@@ -196,7 +196,7 @@ class TechnicalAnalysis:
             "bollinger_bands": TechnicalAnalysis.bollinger_bands(close),
             "atr_14": float(TechnicalAnalysis.atr(high, low, close, 14)),
             "volume": TechnicalAnalysis.volume_analysis(volume, price_change_pct),
-            "momentum_10": float(TechnicalAnalysis.momentum(close, 10))
+            "momentum_5": float(TechnicalAnalysis.momentum(close, 5))
         }
 
         result["score"] = TechnicalAnalysis.score_signals(result)

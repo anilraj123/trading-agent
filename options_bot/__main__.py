@@ -18,51 +18,24 @@ from trader.tracker import save_daily_snapshot, save_trade, generate_weekly_summ
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="[%H:%M:%S]")
 logger = logging.getLogger("options")
 
-ALLOCATED_PCT = 0.40           # RESTARTED: 40% allocated (~$666 at ~$1.7k equity, ~$83/position)
-                                # Tier 2: spread 0.50, OI 200, 50-stock watchlist
-                                # See PARAMETER_REVIEW_CHECKLIST.md for details
-PER_POSITION_PCT = 0.25        # 25% of allocated per position (~$85 at current equity)
+ALLOCATED_PCT = 0.40           # 40% allocated (~$340 at current equity, ~$85/position)
+                                # Custom tier: spread $1.00, OI 50
+PER_POSITION_PCT = 0.20        # 20% of allocated per position (~$66 at current equity, 2-3 positions)
 TOTAL_DEPLOYED_PCT = 0.50      # 50% of allocated total cap
 TARGET_GAIN_PCT = 50
 CONTRACT_DTE_MIN = 7
 CONTRACT_DTE_MAX = 35
 OPTIONS_WATCHLIST_SIZE = 50    # Expanded from 30 for broader symbol coverage
 
-# Liquidity guardrails (tiered approach)
-# Tier 1 (strict): Maximum quality, lowest slippage
-MIN_OPTION_OI_TIER1 = 500
-MAX_OPTION_SPREAD_TIER1 = 0.20
-
-# Tier 2 (relaxed): Balance of quality vs availability
-MIN_OPTION_OI_TIER2 = 200
-MAX_OPTION_SPREAD_TIER2 = 0.50
-
-# Currently using Tier 2 (0.50 spread, 200+ OI) for better viability
-MIN_OPTION_OI = MIN_OPTION_OI_TIER2
-MAX_OPTION_SPREAD = MAX_OPTION_SPREAD_TIER2
+# Liquidity guardrails
+# Custom tier: spread $1.00, OI 50 — balance of availability vs exit liquidity
+MIN_OPTION_OI = 50
+MAX_OPTION_SPREAD = 1.00
 
 class NotificationManager(BaseNotif):
     def send(self, message, priority="normal"):
         msg = f"[OPTIONS] {message}"
         super().send(msg, priority)
-
-
-def _quote_option(client, symbol):
-    try:
-        snap = client.get_option_snapshot(OptionSnapshotRequest(symbol_or_symbols=symbol))
-        if isinstance(snap, dict) and symbol in snap:
-            snap = snap[symbol]
-        if isinstance(snap, dict):
-            q = snap.get("latest_quote") or snap.get("quote")
-        else:
-            q = getattr(snap, "latest_quote", None) or getattr(snap, "quote", None)
-        if not q:
-            return None, None
-        if isinstance(q, dict):
-            return float(q.get("bid_price") or q.get("bid") or 0), float(q.get("ask_price") or q.get("ask") or 0)
-        return float(getattr(q, "bid_price", 0) or 0), float(getattr(q, "ask_price", 0) or 0)
-    except:
-        return None, None
 
 
 def _underlying_price(symbol):
@@ -91,7 +64,7 @@ def _option_dte(symbol):
 
 def _get_dynamic_stop(dte):
     if dte is None:
-        return -0.80
+        return None
     if dte <= 5:
         return -0.25
     elif dte <= 14:
@@ -108,16 +81,39 @@ def _force_exit_near_expiry(dte):
             return True
     return False
 
+def _batch_quote_options(data_client, contract_symbols):
+    if not contract_symbols:
+        return {}
+    quotes = {}
+    for i in range(0, len(contract_symbols), 100):
+        batch = contract_symbols[i:i+100]
+        try:
+            req = OptionSnapshotRequest(symbol_or_symbols=batch)
+            resp = data_client.get_option_snapshot(req)
+            if isinstance(resp, dict):
+                quotes.update(resp)
+        except:
+            pass
+    return quotes
+
+def _contract_is_otm(c, price):
+    strike = float(c.strike_price)
+    return (c.type == "call" and strike > price) or (c.type == "put" and strike < price)
+
+def _contract_otm_pct(c, price):
+    strike = float(c.strike_price)
+    return (strike / price - 1) * 100 if c.type == "call" else (1 - strike / price) * 100
+
 def _has_viable_option(trading_client, data_client, symbol, budget):
     today_d = date.today()
     price = _underlying_price(symbol)
     if not price:
         return False
-    
-    # Track rejection reasons for diagnostics
+
     total_contracts = 0
     rejected = {"no_price": 0, "itm": 0, "low_oi": 0, "wide_spread": 0, "budget": 0, "otm_violation": 0}
-    
+    otm_contracts = []
+
     for start_dte, end_dte in [(7, 10), (11, 14), (15, 18), (19, 21), (22, 25), (26, 28), (29, 32), (33, CONTRACT_DTE_MAX)]:
         try:
             req = GetOptionContractsRequest(
@@ -129,46 +125,64 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
             if not hasattr(resp, "option_contracts"):
                 continue
             for c in resp.option_contracts:
-                try:
-                    total_contracts += 1
-                    strike = float(c.strike_price)
-                    if c.type not in ("call", "put"):
-                        continue
-                    is_otm = (c.type == "call" and strike > price) or (c.type == "put" and strike < price)
-                    if not is_otm:
-                        rejected["itm"] += 1
-                        continue
-                    oi = getattr(c, "open_interest", 0) or 0
+                total_contracts += 1
+                if c.type not in ("call", "put"):
+                    continue
+                if not _contract_is_otm(c, price):
+                    rejected["itm"] += 1
+                    continue
+                    oi = int(getattr(c, "open_interest", 0) or 0)
                     if oi < MIN_OPTION_OI:
                         rejected["low_oi"] += 1
                         continue
-                    bid, ask = _quote_option(data_client, c.symbol)
-                    if not bid or not ask:
-                        rejected["no_price"] += 1
-                        continue
-                    if ask - bid > MAX_OPTION_SPREAD:
-                        rejected["wide_spread"] += 1
-                        continue
-                    mid = (bid + ask) / 2
-                    if mid <= 0 or mid * 100 > budget:
-                        rejected["budget"] += 1
-                        continue
-                    dte = (c.expiration_date - today_d).days
-                    otm_pct = (strike / price - 1) * 100 if c.type == "call" else (1 - strike / price) * 100
-                    if dte < 15 and abs(otm_pct) > 5:
-                        rejected["otm_violation"] += 1
-                        continue
-                    # Found viable contract!
-                    logger.debug(f"{symbol}: Found viable {c.type} ${strike:.0f} @ ${mid:.2f} ({dte} DTE, {oi} OI)")
-                    return True
-                except:
-                    pass
+                    otm_contracts.append(c)
         except:
             pass
-    
-    # Log rejection details for debugging (DEBUG level, only shown if enabled)
-    if total_contracts > 0:
-        logger.debug(f"{symbol}: {total_contracts} contracts found, none viable. Rejections: spread={rejected['wide_spread']}, oi={rejected['low_oi']}, budget={rejected['budget']}, otm%={rejected['otm_violation']}, itm={rejected['itm']}")
+
+    if not otm_contracts:
+        return False
+
+    quotes = _batch_quote_options(data_client, [c.symbol for c in otm_contracts])
+
+    for c in otm_contracts:
+        try:
+            snap = quotes.get(c.symbol)
+            if not snap:
+                rejected["no_price"] += 1
+                continue
+            if isinstance(snap, dict):
+                q = snap.get("latest_quote") or snap.get("quote")
+            else:
+                q = getattr(snap, "latest_quote", None) or getattr(snap, "quote", None)
+            if not q:
+                rejected["no_price"] += 1
+                continue
+            if isinstance(q, dict):
+                bid = float(q.get("bid_price") or q.get("bid") or 0)
+                ask = float(q.get("ask_price") or q.get("ask") or 0)
+            else:
+                bid = float(getattr(q, "bid_price", 0) or 0)
+                ask = float(getattr(q, "ask_price", 0) or 0)
+            if not bid or not ask:
+                rejected["no_price"] += 1
+                continue
+            if ask - bid > MAX_OPTION_SPREAD:
+                rejected["wide_spread"] += 1
+                continue
+            mid = (bid + ask) / 2
+            if mid <= 0 or mid * 100 > budget:
+                rejected["budget"] += 1
+                continue
+            dte = (c.expiration_date - today_d).days
+            otm_pct = _contract_otm_pct(c, price)
+            if dte < 15 and abs(otm_pct) > 5:
+                rejected["otm_violation"] += 1
+                continue
+            logger.debug(f"{symbol}: Found viable {c.type} ${float(c.strike_price):.0f} @ ${mid:.2f} ({dte} DTE, {oi} OI)")
+            return True
+        except:
+            pass
+
     return False
 
 
@@ -193,15 +207,42 @@ def _find_contract(trading_client, data_client, symbol, direction, budget):
     if not all_contracts: return None
 
     candidates = []
+    eligible = []
     for c in all_contracts:
         try:
             strike = float(c.strike_price)
             if c.type != ("call" if direction == "bullish" else "put"): continue
             if direction == "bullish" and strike <= price: continue
             if direction == "bearish" and strike >= price: continue
-            open_interest = getattr(c, "open_interest", 0) or 0
+            open_interest = int(getattr(c, "open_interest", 0) or 0)
             if open_interest < MIN_OPTION_OI: continue
-            bid, ask = _quote_option(data_client, c.symbol)
+            eligible.append(c)
+        except:
+            pass
+
+    if not eligible:
+        return None
+
+    quotes = _batch_quote_options(data_client, [c.symbol for c in eligible])
+
+    for c in eligible:
+        try:
+            strike = float(c.strike_price)
+            snap = quotes.get(c.symbol)
+            if not snap:
+                continue
+            if isinstance(snap, dict):
+                q = snap.get("latest_quote") or snap.get("quote")
+            else:
+                q = getattr(snap, "latest_quote", None) or getattr(snap, "quote", None)
+            if not q:
+                continue
+            if isinstance(q, dict):
+                bid = float(q.get("bid_price") or q.get("bid") or 0)
+                ask = float(q.get("ask_price") or q.get("ask") or 0)
+            else:
+                bid = float(getattr(q, "bid_price", 0) or 0)
+                ask = float(getattr(q, "ask_price", 0) or 0)
             if not bid or not ask: continue
             if ask - bid > MAX_OPTION_SPREAD: continue
             mid = (bid + ask) / 2
@@ -334,12 +375,22 @@ class OptionsBot:
                     spy_pct = round((spy_price / float(bars['close'].iloc[0]) - 1) * 100, 2)
 
             per_pos_budget = allocated * PER_POSITION_PCT
-            viable = [s for s in self.watchlist if _has_viable_option(self.alpaca.trading, self.opt_data, s, per_pos_budget)]
+
+            # Filter out symbols already held in open positions (no stacking same underlying)
+            held_symbols = set()
+            for p in opt_positions:
+                sym = p.symbol
+                ticker = sym.rstrip("0123456789")
+                ticker = ticker.rstrip("CP")
+                ticker = ticker.rstrip("0123456789")
+                held_symbols.add(ticker)
+
+            viable = [s for s in self.watchlist if s not in held_symbols and _has_viable_option(self.alpaca.trading, self.opt_data, s, per_pos_budget)]
             if not viable:
-                logger.info(f"No symbols with viable options ({len(self.watchlist)} checked, max spread: ${MAX_OPTION_SPREAD:.2f}, min OI: {MIN_OPTION_OI})")
+                logger.info(f"No symbols with viable options ({len(self.watchlist)} checked, max spread=${MAX_OPTION_SPREAD:.2f}, min OI={MIN_OPTION_OI})")
                 return
             if len(viable) < len(self.watchlist):
-                logger.info(f"Filtered watchlist: {len(viable)}/{len(self.watchlist)} have viable options (spread ≤ ${MAX_OPTION_SPREAD:.2f}, OI ≥ {MIN_OPTION_OI})")
+                logger.info(f"Filtered watchlist: {len(viable)}/{len(self.watchlist)} have viable options (spread≤${MAX_OPTION_SPREAD:.2f}, OI≥{MIN_OPTION_OI})")
 
             summary = {"equity": equity, "cash": cash, "open_options": len(opt_positions), "spy_pct": spy_pct}
             signal = _get_signal(self.llm, summary, viable)
@@ -398,8 +449,14 @@ class OptionsBot:
             pnl = (cp / ep - 1) * 100
             dte = _option_dte(pos.symbol)
             stop = _get_dynamic_stop(dte)
-            logger.info(f"{pos.symbol}: PnL {pnl:+.1f}% (dte={dte}, stop={stop:.0%})")
-            if pnl >= TARGET_GAIN_PCT:
+            logger.info(f"{pos.symbol}: PnL {pnl:+.1f}% (dte={dte}, stop={stop})")
+            if dte is None:
+                self.alpaca.trading.close_position(pos.symbol)
+                dollar_pnl = (cp - ep) * float(pos.qty) * 100
+                save_trade("options", pos.symbol, "FORCE EXIT (NO DTE)", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
+                self.notif.send(f"Force exit {pos.symbol} at {pnl:.0f}% (unparseable DTE)", priority="high")
+                self._daily_losses += 1
+            elif pnl >= TARGET_GAIN_PCT:
                 self.alpaca.trading.close_position(pos.symbol)
                 dollar_pnl = (cp - ep) * float(pos.qty) * 100
                 save_trade("options", pos.symbol, "TP CLOSE", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
