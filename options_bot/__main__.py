@@ -131,11 +131,14 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
                 if not _contract_is_otm(c, price):
                     rejected["itm"] += 1
                     continue
-                    oi = int(getattr(c, "open_interest", 0) or 0)
-                    if oi < MIN_OPTION_OI:
-                        rejected["low_oi"] += 1
-                        continue
-                    otm_contracts.append(c)
+                # OI check + append must run when the contract IS OTM. Previously these
+                # lines were indented one level deeper after a `continue`, so they were
+                # dead code and _has_viable_option always returned False (no new opens).
+                oi = int(getattr(c, "open_interest", 0) or 0)
+                if oi < MIN_OPTION_OI:
+                    rejected["low_oi"] += 1
+                    continue
+                otm_contracts.append(c)
         except:
             pass
 
@@ -359,7 +362,11 @@ class OptionsBot:
 
             acct = self.alpaca.get_account()
             equity = float(acct.equity)
-            cash = float(acct.cash)
+            # Soft cash reservation: trader bot uses 60% of cash, options bot uses 40%
+            # (= ALLOCATED_PCT). Both bots share one Alpaca cash pool, so we scale the
+            # visible cash down to our allocation. Prevents races where one bot drains
+            # cash earmarked for the other. Counterpart in trader/__main__.py.
+            cash = float(acct.cash) * ALLOCATED_PCT
             allocated = equity * ALLOCATED_PCT
             total_cap = allocated * TOTAL_DEPLOYED_PCT
 

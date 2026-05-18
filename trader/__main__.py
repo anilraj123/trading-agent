@@ -48,18 +48,42 @@ class TradingBot:
         self.status_interval = 4
         self.start_date = datetime.now()
         self.last_summary_date = None
-        self.starting_account_value = self.alpaca.get_portfolio_value()
-        self.account_value = self.starting_account_value
-        self.day_start_value = self.account_value
-        self.total_deposited = max(self.starting_account_value, Config.SIMULATED_ACCOUNT_SIZE)
-        # REALLOCATED: 60% to trading, 40% to options (restarted at ~$1.7k equity)
-        self.trading_capital_allocation = 0.60  # 60% trading, 40% options
-        
-        # NEW: Track deposits separately from trading P&L
+        # initial_seed is the immutable "principal at first-ever bot startup". It is
+        # persisted on disk so that restarts AFTER a deposit don't snapshot the new
+        # (deposit-inflated) equity as the baseline. Without this, deposits would be
+        # double-counted: once via the inflated starting_account_value and again via
+        # the deposits.csv subtraction below.
+        self.starting_account_value = self._load_or_init_seed()
+        # account_value tracks "principal lineage + realized/unrealized P&L" (i.e.,
+        # excludes deposits). trading_capital sizes risk off this rather than raw
+        # Alpaca equity so cash injections don't auto-inflate position sizes.
         self.known_deposits = self._load_deposits_csv()
         self.total_known_deposits = sum(self.known_deposits)
-        self.last_equity_check = self.starting_account_value
-        logger.info(f"Deposits loaded: ${self.total_known_deposits:.2f} known")
+        current_equity = self.alpaca.get_portfolio_value()
+        self.account_value = current_equity - self.total_known_deposits
+        self.day_start_value = self.account_value
+        # REALLOCATED: 60% to trading, 40% to options (restarted at ~$1.7k equity)
+        self.trading_capital_allocation = 0.60  # 60% trading, 40% options
+        logger.info(f"Initial seed: ${self.starting_account_value:.2f} | Deposits loaded: ${self.total_known_deposits:.2f} | Current equity: ${current_equity:.2f} | Account value (seed + PnL): ${self.account_value:.2f}")
+
+    def _load_or_init_seed(self) -> float:
+        """Return the immutable initial seed. Writes it once on first run."""
+        seed_file = "/app/data/initial_seed.txt"
+        if os.path.exists(seed_file):
+            try:
+                with open(seed_file) as f:
+                    return float(f.read().strip())
+            except Exception as e:
+                logger.error(f"Failed to read initial_seed.txt ({e}); falling back to current equity (will be re-written)")
+        seed = self.alpaca.get_portfolio_value()
+        try:
+            os.makedirs(os.path.dirname(seed_file), exist_ok=True)
+            with open(seed_file, "w") as f:
+                f.write(f"{seed:.2f}")
+            logger.info(f"Initialized seed file at ${seed:.2f}")
+        except Exception as e:
+            logger.error(f"Failed to write initial_seed.txt: {e}")
+        return seed
     
     def _load_deposits_csv(self):
         """Load known deposits from deposits.csv."""
@@ -131,10 +155,14 @@ class TradingBot:
             stop_loss_orders = self.risk.check_stop_losses(positions)
             for order in stop_loss_orders:
                 self.alpaca.close_position(order["symbol"])
+                # Drop the risk-manager entry so the next cycle doesn't try to fire a
+                # second stop on a position that's already been closed.
+                self.risk.unregister_position(order["symbol"])
                 pnl_pct = (order["current_price"] - order["entry_price"]) / order["entry_price"] * 100
                 dollar_pnl = (order["current_price"] - order["entry_price"]) * order["quantity"]
                 self.risk.total_realized_pnl += dollar_pnl
-                self.risk.record_trade(order["symbol"], "SELL (STOP LOSS)", order["quantity"], order["current_price"], pnl=pnl_pct)
+                # Forced exit (stop-loss): don't count toward the daily voluntary-trade cap.
+                self.risk.record_trade(order["symbol"], "SELL (STOP LOSS)", order["quantity"], order["current_price"], pnl=pnl_pct, pnl_dollars=dollar_pnl, counts_toward_daily_cap=False)
                 save_trade("trading", order["symbol"], "STOP LOSS", order["quantity"], entry_price=order["entry_price"], exit_price=order["current_price"], pnl_pct=pnl_pct, pnl_dollars=dollar_pnl)
                 self.notif.notify_stop_loss(order["symbol"], order["entry_price"], order["current_price"], pnl_pct)
 
@@ -149,8 +177,10 @@ class TradingBot:
                 pnl_pct = (curr_p / entry_p - 1) * 100
                 dollar_pnl = (curr_p - entry_p) * qty
                 self.alpaca.close_position(sym)
+                self.risk.unregister_position(sym)
                 self.risk.total_realized_pnl += dollar_pnl
-                self.risk.record_trade(sym, "SELL (EXPIRY)", qty, curr_p, pnl=pnl_pct)
+                # Forced exit (holding-period expiry): don't count toward the daily voluntary-trade cap.
+                self.risk.record_trade(sym, "SELL (EXPIRY)", qty, curr_p, pnl=pnl_pct, pnl_dollars=dollar_pnl, counts_toward_daily_cap=False)
                 save_trade("trading", sym, "EXPIRY CLOSE", qty, entry_price=entry_p, exit_price=curr_p, pnl_pct=pnl_pct, pnl_dollars=dollar_pnl)
                 self.notif.send(f"Expired: sold {sym} after {Config.RISK_MAX_HOLDING_DAYS} days (PnL: {pnl_pct:+.2f}%)")
 
@@ -190,12 +220,16 @@ class TradingBot:
 
         try:
             current_value = self.alpaca.get_portfolio_value()
-            
-            # Calculate true returns (excluding deposits)
+
+            # true_trading_pnl  = current equity − everything we ever put in (seed + deposits)
+            # principal_invested is the denominator for "% return on capital": you'd be flat
+            # if return_pct = 0 (current_value == principal). Using just the seed as the
+            # denominator (the prior behavior) overstated returns after any deposit.
             total_deposits = self.total_known_deposits
-            true_trading_pnl = current_value - self.starting_account_value - total_deposits
-            true_return_pct = (true_trading_pnl / max(self.starting_account_value, 1)) * 100
-            total_return_pct = ((current_value / self.starting_account_value) - 1) * 100
+            principal_invested = self.starting_account_value + total_deposits
+            true_trading_pnl = current_value - principal_invested
+            true_return_pct = (true_trading_pnl / max(principal_invested, 1)) * 100
+            total_return_pct = ((current_value / max(principal_invested, 1)) - 1) * 100
             
             days_elapsed = (datetime.now() - self.start_date).days
 
@@ -207,6 +241,10 @@ class TradingBot:
             spy_bars = self.alpaca.get_bars('SPY', days=max(3, days_elapsed + 5))
             spy_apy = 0
             spy_return_pct = 0
+            # Default spy_value to starting equity (i.e., "SPY flat") so the f-string below
+            # can't NameError if the SPY bars fetch fails. The outer except would otherwise
+            # swallow the error and silently drop the entire daily summary.
+            spy_value = self.starting_account_value
             if spy_bars is not None and len(spy_bars) > 1:
                 spy_start = spy_bars['close'].iloc[0]
                 spy_end = spy_bars['close'].iloc[-1]
@@ -327,8 +365,18 @@ class TradingBot:
                 logger.info(f"Lifted {symbol} qty to ${quantity * price:.0f} min notional (${MIN_NOTIONAL})")
 
             if action == "BUY" and quantity > 0:
-                available_cash = portfolio["cash"]
-                max_position_value = self.account_value * Config.RISK_MAX_POSITION_PCT
+                # Soft cash reservation: both bots share one Alpaca account, so each only
+                # "sees" its allocation slice of the cash pool. Without this, whichever bot
+                # ran first could consume cash earmarked for the other and the second bot
+                # would get rejected with "No cash available". This is a soft cap — nothing
+                # physically prevents overspend, but in steady state each bot stays in its
+                # lane and races are eliminated.
+                available_cash = portfolio["cash"] * self.trading_capital_allocation
+                # Anchor the soft cap to trading_capital (same anchor RiskManager.validate_order uses).
+                # Previously this used self.account_value, which is the un-allocated base — that made
+                # the soft cap looser than the validator's, so it was effectively dead. Keeping them
+                # in sync means a change to RISK_MAX_POSITION_PCT scales both gates consistently.
+                max_position_value = self.trading_capital * Config.RISK_MAX_POSITION_PCT
                 cost = quantity * price
 
                 if cost > available_cash:
@@ -351,8 +399,10 @@ class TradingBot:
             if action == "SELL" and symbol in self.risk.positions:
                 entry_price = self.risk.positions[symbol]["entry_price"]
 
+            # Pass the trader's reserved cash slice (not raw account cash) so the
+            # validator's "not enough cash" check matches the soft reservation above.
             approved, reason = self.risk.validate_order(
-                decision, self.trading_capital, portfolio["cash"],
+                decision, self.trading_capital, portfolio["cash"] * self.trading_capital_allocation,
                 self.alpaca.get_positions()
             )
 
@@ -367,7 +417,11 @@ class TradingBot:
                     use_bracket = quantity == int(quantity)
                     order_stop = stop_loss_price if use_bracket else None
 
+                    # Submit FIRST. Only register the position with the risk manager
+                    # after Alpaca accepts the order — otherwise a failed submit leaves
+                    # a phantom entry that the software-stop loop will react to.
                     self.alpaca.submit_market_order(symbol, OrderSide.BUY, quantity, stop_loss=order_stop)
+                    self.risk.register_position(symbol, price, quantity)
                     self.risk.record_trade(symbol, "BUY", quantity, price, strategy=strategy)
                     self.notif.notify_trade("BUY", symbol, quantity, price)
                     save_trade("trading", symbol, "BUY", quantity, entry_price=price, strategy=strategy, reason=decision.get("reasoning"))
@@ -376,13 +430,17 @@ class TradingBot:
 
                 elif action == "SELL" and quantity > 0:
                     self.alpaca.submit_market_order(symbol, OrderSide.SELL, quantity)
+                    # Unregister only after submit succeeds, so a failed sell doesn't
+                    # silently drop the stop-loss tracking on a position we still hold.
+                    self.risk.unregister_position(symbol)
                     if entry_price is not None:
                         dollar_pnl = (price - entry_price) * quantity
                         self.risk.total_realized_pnl += dollar_pnl
                         pnl_pct = (price - entry_price) / entry_price * 100
-                        self.risk.record_trade(symbol, "SELL", quantity, price, pnl=pnl_pct, strategy=strategy)
+                        self.risk.record_trade(symbol, "SELL", quantity, price, pnl=pnl_pct, pnl_dollars=dollar_pnl, strategy=strategy)
                         save_trade("trading", symbol, "SELL", quantity, entry_price=entry_price, exit_price=price, pnl_pct=pnl_pct, pnl_dollars=dollar_pnl, strategy=strategy, stop_type="llm_signal")
                     else:
+                        # No tracked entry (likely a position opened before bot restart). Skip P&L attribution.
                         self.risk.record_trade(symbol, "SELL", quantity, price, strategy=strategy)
                         save_trade("trading", symbol, "SELL", quantity, exit_price=price, strategy=strategy, stop_type="llm_signal")
                     self.notif.notify_trade("SELL", symbol, quantity, price)

@@ -44,6 +44,11 @@ class RiskManager:
         if confidence < Config.RISK_MIN_CONFIDENCE:
             return False, f"Confidence too low ({confidence:.2f} < {Config.RISK_MIN_CONFIDENCE})"
 
+        # validate_order is now PURE validation. It does NOT mutate self.positions —
+        # registering a position before the broker accepts the order produced phantom
+        # entries when submission failed, which then triggered software stop-loss checks
+        # against positions that didn't exist. The caller is responsible for invoking
+        # register_position / unregister_position only after a successful Alpaca submit.
         if action == "BUY":
             if quantity <= 0:
                 return False, "Invalid buy quantity"
@@ -57,28 +62,30 @@ class RiskManager:
             if position_value > cash * 0.95:
                 return False, f"Not enough cash. Need ${position_value:.2f}, have ${cash:.2f}"
 
-            stop_loss = current_price * (1 + Config.TA_STOP_LOSS_PCT)
-            self.positions[symbol] = {
-                "entry_price": current_price,
-                "stop_loss": stop_loss,
-                "quantity": quantity,
-                "date": datetime.now()
-            }
-            logger.info(f"Stop loss set for {symbol}: ${stop_loss:.2f} ({Config.TA_STOP_LOSS_PCT:.0%} from ${current_price:.2f})")
-
         elif action == "SELL":
             own_any = any(p.symbol == symbol for p in current_positions)
             if not own_any:
                 return False, f"No position in {symbol} to sell"
 
-            if symbol in self.positions:
-                entry = self.positions[symbol]["entry_price"]
-                pnl = (current_price - entry) / entry * 100
-                logger.info(f"Closing {symbol}: Entry ${entry:.2f} -> Exit ${current_price:.2f} (PnL: {pnl:+.2f}%)")
-                self.position_entry_dates.pop(symbol, None)
-                del self.positions[symbol]
-
         return True, "Approved"
+
+    def register_position(self, symbol: str, entry_price: float, quantity: float):
+        """Call AFTER a buy order is successfully submitted. Records the entry price,
+        software stop-loss level, and entry timestamp used by check_stop_losses /
+        get_expired_positions."""
+        stop_loss = entry_price * (1 + Config.TA_STOP_LOSS_PCT)
+        self.positions[symbol] = {
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "quantity": quantity,
+            "date": datetime.now()
+        }
+        logger.info(f"Stop loss set for {symbol}: ${stop_loss:.2f} ({Config.TA_STOP_LOSS_PCT:.0%} from ${entry_price:.2f})")
+
+    def unregister_position(self, symbol: str):
+        """Call AFTER a sell/close order is successfully submitted."""
+        self.positions.pop(symbol, None)
+        self.position_entry_dates.pop(symbol, None)
 
     def check_stop_losses(self, current_positions: list) -> list:
         stop_loss_triggers = []
@@ -100,9 +107,15 @@ class RiskManager:
 
         return stop_loss_triggers
 
-    def record_trade(self, symbol: str, action: str, quantity: float, price: float, pnl: float = 0, strategy: str = "unknown"):
-        self.daily_trades += 1
-        self.daily_pnl += pnl
+    def record_trade(self, symbol: str, action: str, quantity: float, price: float, pnl: float = 0, pnl_dollars: float = 0, strategy: str = "unknown", counts_toward_daily_cap: bool = True):
+        # `pnl` is the percentage gain/loss on this trade (used for the wins/losses
+        # buckets and the human-readable log). `pnl_dollars` is what feeds the
+        # daily loss-limit check, because Config.RISK_DAILY_LOSS_LIMIT is expressed
+        # as a percent of trading capital and gets converted to dollars in can_trade.
+        # Mixing the two units silently disabled the daily loss limit before this fix.
+        if counts_toward_daily_cap:
+            self.daily_trades += 1
+        self.daily_pnl += pnl_dollars
         self.trade_log.append({
             "timestamp": datetime.now().isoformat(),
             "symbol": symbol,
@@ -110,13 +123,14 @@ class RiskManager:
             "quantity": quantity,
             "price": price,
             "pnl": pnl,
+            "pnl_dollars": pnl_dollars,
             "strategy": strategy
         })
         if "BUY" in action:
             self.position_entry_dates[symbol] = datetime.now()
         elif "SELL" in action:
             self.position_entry_dates.pop(symbol, None)
-        logger.info(f"Trade recorded: {action} {quantity} {symbol} @ ${price:.2f} | PnL: ${pnl:.2f}")
+        logger.info(f"Trade recorded: {action} {quantity} {symbol} @ ${price:.2f} | PnL: {pnl:+.2f}% (${pnl_dollars:+.2f})")
 
     def get_expired_positions(self, current_positions: list, max_days: int = None) -> list[str]:
         if max_days is None:
