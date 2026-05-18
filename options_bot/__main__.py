@@ -18,10 +18,10 @@ from trader.tracker import save_daily_snapshot, save_trade, generate_weekly_summ
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="[%H:%M:%S]")
 logger = logging.getLogger("options")
 
-ALLOCATED_PCT = 0.00           # PAUSED: 0% allocated (constraints too tight for $840 account)
-                                # Will restart when equity ≥ $2k with relaxed constraints
+ALLOCATED_PCT = 0.40           # RESTARTED: 40% allocated (~$666 at ~$1.7k equity, ~$83/position)
+                                # Tier 2: spread 0.50, OI 200, 50-stock watchlist
                                 # See PARAMETER_REVIEW_CHECKLIST.md for details
-PER_POSITION_PCT = 0.08        # 8% of allocated per position
+PER_POSITION_PCT = 0.25        # 25% of allocated per position (~$85 at current equity)
 TOTAL_DEPLOYED_PCT = 0.50      # 50% of allocated total cap
 TARGET_GAIN_PCT = 50
 CONTRACT_DTE_MIN = 7
