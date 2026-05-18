@@ -15,7 +15,9 @@ class Config:
 
     RISK_MAX_POSITION_PCT = float(os.getenv("RISK_MAX_POSITION_PCT", "0.10"))
     RISK_DAILY_LOSS_LIMIT = float(os.getenv("RISK_DAILY_LOSS_LIMIT", "-5.00"))
-    RISK_STOP_LOSS_PCT = float(os.getenv("RISK_STOP_LOSS_PCT", "-0.03"))
+    # Stop-loss fraction (negative). Falls back to legacy TA_STOP_LOSS_PCT for
+    # backward compatibility with existing .env files; RISK_STOP_LOSS_PCT wins if set.
+    RISK_STOP_LOSS_PCT = float(os.getenv("RISK_STOP_LOSS_PCT", os.getenv("TA_STOP_LOSS_PCT", "-0.03")))
     RISK_MAX_TRADES_PER_DAY = int(os.getenv("RISK_MAX_TRADES_PER_DAY", "5"))
     RISK_MAX_HOLDING_DAYS = int(os.getenv("RISK_MAX_HOLDING_DAYS", "3"))
     RISK_MIN_CONFIDENCE = float(os.getenv("RISK_MIN_CONFIDENCE", "0.6"))
@@ -39,7 +41,10 @@ class Config:
     TA_VOL_BOOST = float(os.getenv("TA_VOL_BOOST", "1.2"))
     TA_MIN_BUY_SCORE = float(os.getenv("TA_MIN_BUY_SCORE", "0.5"))
     TA_MIN_SELL_SCORE = float(os.getenv("TA_MIN_SELL_SCORE", "1.0"))
-    TA_STOP_LOSS_PCT = float(os.getenv("TA_STOP_LOSS_PCT", "-0.03"))
+    # TA_STOP_LOSS_PCT is now an alias of RISK_STOP_LOSS_PCT. Kept for code that
+    # historically read Config.TA_STOP_LOSS_PCT (LLM prompt, panels, etc.). Always
+    # mirrors RISK_STOP_LOSS_PCT so changing one place is enough.
+    TA_STOP_LOSS_PCT = RISK_STOP_LOSS_PCT
 
     TIMEZONE = os.getenv("TIMEZONE", "UTC")
     NOTIFY_PROVIDER = os.getenv("NOTIFY_PROVIDER", "whatsapp")

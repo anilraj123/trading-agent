@@ -42,7 +42,7 @@
 | `TA_VOL_BOOST` | **1.2x** | Score multiplier when volume exceeds threshold |
 | `TA_MIN_BUY_SCORE` | **0.65** | Minimum composite score to place a buy order |
 | `TA_MIN_SELL_SCORE` | **0.60** | Minimum composite score to place a sell order |
-| `TA_STOP_LOSS_PCT` | **-0.03** (-3%) | Stop loss for order placement |
+| `TA_STOP_LOSS_PCT` | alias | Deprecated env-var; if set, used as fallback for `RISK_STOP_LOSS_PCT`. Code now reads `RISK_STOP_LOSS_PCT` everywhere. |
 
 | Indicator | Periods | Lookback |
 |---|---|---|
@@ -146,3 +146,12 @@
 | May 18 | Options spread: $2.00 → **$1.00** (T3 spread) |
 | May 18 | Options per-position: 25% → **20%** (3 positions instead of 2) |
 | May 18 | Unknown DTE: -80% stop → **force close** (alert on bad data) |
+| May 18 | Options pre-filter bug: dead code after `continue` meant `_has_viable_option` always returned False (bot never opened new positions); outdented OI check + append |
+| May 18 | Risk manager `daily_pnl`: was summing trade % values vs $ threshold (loss limit never tripped); now tracks dollars |
+| May 18 | Forced exits (stop loss, holding-period expiry) no longer count toward `RISK_MAX_TRADES_PER_DAY` |
+| May 18 | Risk-manager positions registered only AFTER successful submit (no more phantom entries) |
+| May 18 | Trader position-size soft cap re-anchored to `trading_capital` to match validator |
+| May 18 | Initial seed persisted to `initial_seed.txt` so restarts after a deposit don't double-count |
+| May 18 | Daily summary `spy_value` now initialized before the SPY-bars conditional (was NameError on fetch failure) |
+| May 18 | `RISK_STOP_LOSS_PCT` is the authoritative stop-loss knob; `TA_STOP_LOSS_PCT` kept only as a backwards-compatible env-var alias |
+| May 18 | Cash reservation: each bot only sees its allocation slice of cash, preventing inter-bot races |
