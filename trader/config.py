@@ -25,7 +25,9 @@ class Config:
     TRADING_INTERVAL_MINUTES = int(os.getenv("TRADING_INTERVAL_MINUTES", "15"))
     WATCHLIST = [s.strip() for s in os.getenv("WATCHLIST", "AAPL,MSFT,TSLA,SPY,QQQ").split(",")]
     BLACKLIST = [s.strip().upper() for s in os.getenv("BLACKLIST", "").split(",") if s.strip()]
+    CRYPTO_SUFFIXES = [s.upper() for s in os.getenv("CRYPTO_SUFFIXES", "USD,USDT,USDC,BTC").split(",") if s.strip()]
     SIMULATED_ACCOUNT_SIZE = float(os.getenv("SIMULATED_ACCOUNT_SIZE", "200"))
+    MAX_STOCK_DEPLOYMENT_PCT = float(os.getenv("MAX_STOCK_DEPLOYMENT_PCT", "0.50"))
 
     TA_RSI_OVERSOLD = float(os.getenv("TA_RSI_OVERSOLD", "35"))
     TA_RSI_OVERBOUGHT = float(os.getenv("TA_RSI_OVERBOUGHT", "65"))
