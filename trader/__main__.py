@@ -336,6 +336,12 @@ class TradingBot:
     def _execute_decisions(self, decisions: dict, portfolio: dict) -> list:
         action_results = []
 
+        # Total stock deployment cap: never use more than N% of cash for stock positions.
+        # The remainder acts as an options buying power buffer.
+        positions = self.alpaca.get_positions()
+        stock_mv = sum(float(p.qty) * float(p.current_price) for p in positions if len(p.symbol) <= 10)
+        total_cash = portfolio["cash"]
+
         for decision in decisions.get("decisions", []):
             symbol = decision.get("symbol")
             action = decision.get("action")
@@ -345,9 +351,15 @@ class TradingBot:
             if not symbol or not action:
                 continue
 
-            if symbol.upper() in Config.BLACKLIST:
+            sym_upper = symbol.upper()
+            if sym_upper in Config.BLACKLIST:
                 logger.info(f"Skipping {symbol} - blacklisted")
                 action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": 0, "status": "rejected", "reason": "Blacklisted"})
+                continue
+
+            if any(sym_upper.endswith(suffix) for suffix in Config.CRYPTO_SUFFIXES):
+                logger.info(f"Rejecting {symbol} - crypto asset not allowed")
+                action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": 0, "status": "rejected", "reason": "Crypto not allowed"})
                 continue
 
             price = self.alpaca.get_latest_price(symbol)
@@ -365,6 +377,25 @@ class TradingBot:
                 logger.info(f"Lifted {symbol} qty to ${quantity * price:.0f} min notional (${MIN_NOTIONAL})")
 
             if action == "BUY" and quantity > 0:
+                # Stock deployment cap: never exceed N% of cash in total stock market value.
+                # This reserves the remaining cash as an options buying power buffer.
+                cost = quantity * price
+                max_stock_deploy = total_cash * Config.MAX_STOCK_DEPLOYMENT_PCT
+                headroom = max_stock_deploy - stock_mv
+                if cost > headroom:
+                    if headroom <= 0:
+                        logger.info(f"Rejecting BUY {symbol}: stock deployment at cap (${stock_mv:.2f} / ${max_stock_deploy:.2f})")
+                        action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "Stock deployment cap reached"})
+                        continue
+                    capped_qty = headroom / price
+                    if capped_qty < 0.001:
+                        logger.info(f"Rejecting BUY {symbol}: insufficient headroom ${headroom:.2f}")
+                        action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "Insufficient stock deployment headroom"})
+                        continue
+                    logger.info(f"Capping {symbol} from ${cost:.2f} to ${capped_qty * price:.2f} (stock deployment cap: ${stock_mv:.2f}/${max_stock_deploy:.2f})")
+                    quantity = capped_qty
+                    decision["quantity"] = quantity
+
                 # Soft cash reservation: both bots share one Alpaca account, so each only
                 # "sees" its allocation slice of the cash pool. Without this, whichever bot
                 # ran first could consume cash earmarked for the other and the second bot
@@ -425,6 +456,7 @@ class TradingBot:
                     self.risk.record_trade(symbol, "BUY", quantity, price, strategy=strategy)
                     self.notif.notify_trade("BUY", symbol, quantity, price)
                     save_trade("trading", symbol, "BUY", quantity, entry_price=price, strategy=strategy, reason=decision.get("reasoning"))
+                    stock_mv += quantity * price  # track for subsequent buys in this cycle
                     logger.info(f"BUY {quantity} {symbol} @ ${price:.2f} [{strategy}] stop=${stop_loss_price:.2f}{' [bracket]' if use_bracket else ' [software stop]'}")
                     action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "executed", "reason": f"stop={stop_loss_price:.2f} bracket={use_bracket}"})
 

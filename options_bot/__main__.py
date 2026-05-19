@@ -1,6 +1,7 @@
 import logging
 import time
 import json
+import re
 import schedule
 from datetime import datetime, timedelta, date
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -13,6 +14,7 @@ from trader.alpaca_client import AlpacaClient
 from trader.llm_engine import LLMEngine
 from trader.notifications import NotificationManager as BaseNotif
 from trader.stock_discovery import StockDiscovery, UNIVERSE_100
+from trader.technical_analysis import TechnicalAnalysis
 from trader.tracker import save_daily_snapshot, save_trade, generate_weekly_summary
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="[%H:%M:%S]")
@@ -66,11 +68,11 @@ def _get_dynamic_stop(dte):
     if dte is None:
         return None
     if dte <= 5:
-        return -0.25
+        return -25
     elif dte <= 14:
-        return -0.40
+        return -40
     else:
-        return -0.55
+        return -55
 
 def _force_exit_near_expiry(dte):
     if dte is None:
@@ -305,6 +307,8 @@ class OptionsBot:
         self._daily_trades = 0
         self._daily_wins = 0
         self._daily_losses = 0
+        self._entry_times = {}  # symbol -> datetime for minimum hold check
+        self._hold_minutes = 15  # minimum hold before stop-loss can trigger
         logger.info(f"Options bot started. Account: ${self.starting_value:.2f}")
 
     def _discover_watchlist(self):
@@ -383,14 +387,12 @@ class OptionsBot:
 
             per_pos_budget = allocated * PER_POSITION_PCT
 
-            # Filter out symbols already held in open positions (no stacking same underlying)
+            # Same-symbol lock: never open a new contract on an underlying we already hold.
             held_symbols = set()
             for p in opt_positions:
-                sym = p.symbol
-                ticker = sym.rstrip("0123456789")
-                ticker = ticker.rstrip("CP")
-                ticker = ticker.rstrip("0123456789")
-                held_symbols.add(ticker)
+                m = re.match(r"^([A-Z]+)", p.symbol)
+                if m:
+                    held_symbols.add(m.group(1))
 
             viable = [s for s in self.watchlist if s not in held_symbols and _has_viable_option(self.alpaca.trading, self.opt_data, s, per_pos_budget)]
             if not viable:
@@ -399,8 +401,33 @@ class OptionsBot:
             if len(viable) < len(self.watchlist):
                 logger.info(f"Filtered watchlist: {len(viable)}/{len(self.watchlist)} have viable options (spread≤${MAX_OPTION_SPREAD:.2f}, OI≥{MIN_OPTION_OI})")
 
+            # TA pre-filter: only send symbols with extreme RSI to the LLM.
+            # RSI < 40 = oversold → potential call buys, RSI > 60 = overbought → potential put buys.
+            # This mirrors the stock bot's technical filter and prevents the LLM from
+            # picking neutral-direction symbols where premium is likely to decay.
+            ta_scores = {}
+            for s in viable:
+                try:
+                    bars = self.alpaca.get_bars(s, days=7)
+                    if bars is not None and len(bars) > 50:
+                        ta = TechnicalAnalysis.compute_all(bars)
+                        ta_scores[s] = ta
+                except:
+                    pass
+
+            viable_for_llm = [s for s in viable if s in ta_scores and (
+                ta_scores[s]["rsi_14"] < 40 or ta_scores[s]["rsi_14"] > 60
+            )]
+            passed_ta = len(viable_for_llm)
+            failed_ta = len(viable) - passed_ta
+            if failed_ta > 0:
+                logger.info(f"TA pre-filter: {passed_ta}/{len(viable)} pass RSI extreme threshold (kept: {viable_for_llm})")
+            if not viable_for_llm:
+                logger.info("No symbols pass TA pre-filter (all RSI in neutral 40-60 range)")
+                return
+
             summary = {"equity": equity, "cash": cash, "open_options": len(opt_positions), "spy_pct": spy_pct}
-            signal = _get_signal(self.llm, summary, viable)
+            signal = _get_signal(self.llm, summary, viable_for_llm)
             if signal.get("error"):
                 self.notif.send(f"Options signal error: {signal['error']}", priority="high")
             if signal.get("direction") == "hold":
@@ -441,6 +468,7 @@ class OptionsBot:
             ))
             total_cost = premium * 100 * contracts
             self._daily_trades += 1
+            self._entry_times[contract.symbol] = datetime.now()
             save_trade("options", symbol, "BUY", contracts, entry_price=premium, strategy=f"{direction}_{dte}dte")
             msg = f"Bought {contracts} {symbol} {contract.type} ${contract.strike_price:.0f} @ ${premium:.2f} ({dte}dte, ${total_cost:.0f} total)"
             logger.info(msg)
@@ -463,24 +491,35 @@ class OptionsBot:
                 save_trade("options", pos.symbol, "FORCE EXIT (NO DTE)", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
                 self.notif.send(f"Force exit {pos.symbol} at {pnl:.0f}% (unparseable DTE)", priority="high")
                 self._daily_losses += 1
+                self._entry_times.pop(pos.symbol, None)
             elif pnl >= TARGET_GAIN_PCT:
                 self.alpaca.trading.close_position(pos.symbol)
                 dollar_pnl = (cp - ep) * float(pos.qty) * 100
                 save_trade("options", pos.symbol, "TP CLOSE", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
                 self.notif.send(f"Closed {pos.symbol} at +{pnl:.0f}% gain", priority="high")
                 self._daily_wins += 1
+                self._entry_times.pop(pos.symbol, None)
             elif _force_exit_near_expiry(dte):
                 self.alpaca.trading.close_position(pos.symbol)
                 dollar_pnl = (cp - ep) * float(pos.qty) * 100
                 save_trade("options", pos.symbol, "FORCE EXIT", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
                 self.notif.send(f"Force exit {pos.symbol} at {pnl:.0f}% (near expiry EOD)", priority="high")
                 self._daily_losses += 1
+                self._entry_times.pop(pos.symbol, None)
             elif pnl <= stop:
+                # Minimum hold time: don't stop-loss in the first N minutes.
+                # Prevents bid-ask spread noise from triggering immediate exits.
+                entered = self._entry_times.get(pos.symbol)
+                held_minutes = (datetime.now() - entered).total_seconds() / 60 if entered else 999
+                if held_minutes < self._hold_minutes:
+                    logger.info(f"Holding {pos.symbol} ({pnl:+.1f}%): only {held_minutes:.0f}m old, skip stop (need ≥{self._hold_minutes}m)")
+                    return
                 self.alpaca.trading.close_position(pos.symbol)
                 dollar_pnl = (cp - ep) * float(pos.qty) * 100
                 save_trade("options", pos.symbol, "STOP LOSS", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
                 self.notif.send(f"Closed {pos.symbol} at {pnl:.0f}% loss (stop={stop:.0%})", priority="high")
                 self._daily_losses += 1
+                self._entry_times.pop(pos.symbol, None)
         except Exception as e:
             logger.error(f"Manage failed: {e}")
 
