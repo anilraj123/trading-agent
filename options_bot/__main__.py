@@ -520,6 +520,18 @@ class OptionsBot:
                 self.notif.send(f"Closed {pos.symbol} at {pnl:.0f}% loss (stop={stop:.0%})", priority="high")
                 self._daily_losses += 1
                 self._entry_times.pop(pos.symbol, None)
+
+            # Minimum value floor: if a contract is worth < $10, close it out.
+            # Prevents holding near-worthless contracts that clutter the portfolio
+            # and drag P&L without any realistic recovery path.
+            contract_market_value = cp * float(pos.qty) * 100
+            if contract_market_value < 10.0:
+                self.alpaca.trading.close_position(pos.symbol)
+                dollar_pnl = (cp - ep) * float(pos.qty) * 100
+                save_trade("options", pos.symbol, "MIN VALUE FLOOR", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
+                self.notif.send(f"Force exit {pos.symbol} at ${contract_market_value:.0f} (below $10 minimum value floor)", priority="high")
+                self._daily_losses += 1
+                self._entry_times.pop(pos.symbol, None)
         except Exception as e:
             logger.error(f"Manage failed: {e}")
 
