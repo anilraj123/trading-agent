@@ -259,7 +259,12 @@ class TradingBot:
 
             wins = len([t for t in self.risk.trade_log if t.get('pnl', 0) >= 0])
             losses = len([t for t in self.risk.trade_log if t.get('pnl', 0) < 0])
-            daily_pnl = self.account_value - self.day_start_value
+            # Stock-only daily P&L: exclude options positions so theta decay doesn't
+            # distort the stock bot's performance tracking. Options operate on a
+            # completely different time horizon (7-35 DTE) and their daily P&L is
+            # tracked separately by the options bot.
+            stock_unrealized = sum(float(p.unrealized_pl) for p in raw_positions if len(p.symbol) <= 10)
+            daily_pnl = stock_unrealized + self.risk.daily_pnl
 
             save_daily_snapshot("trading", self.day_start_value, current_value, daily_pnl, self.risk.daily_trades, wins, losses, total_deposited=total_deposits)
 
@@ -308,6 +313,8 @@ class TradingBot:
         total_value = self.alpaca.get_portfolio_value()
         cash = self.alpaca.get_cash()
         positions = self.alpaca.get_positions()
+        stock_unrealized = sum(float(p.unrealized_pl) for p in positions if len(p.symbol) <= 10)
+        stock_daily_pl = stock_unrealized + self.risk.daily_pnl
 
         technical_analysis = {}
         for symbol in self.watchlist[:100]:
@@ -329,7 +336,7 @@ class TradingBot:
             "technical_analysis": technical_analysis,
             "timestamp": datetime.now().isoformat(),
             "market_open": True,
-            "daily_pl": self.alpaca.get_daily_pl(),
+            "daily_pl": stock_daily_pl,
             "trades_today": self.risk.daily_trades
         }
 
