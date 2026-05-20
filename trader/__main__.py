@@ -445,6 +445,16 @@ class TradingBot:
             if action == "SELL" and symbol in self.risk.positions:
                 entry_price = self.risk.positions[symbol]["entry_price"]
 
+            # PDT guard: block same-day sells. Positions opened today cannot be
+            # sold until the next trading day. Prevents day-trading flag risk and
+            # stops the bot from opening positions with no exit path.
+            if action == "SELL":
+                entry_dt = self.risk.position_entry_dates.get(symbol)
+                if entry_dt and entry_dt.date() == datetime.now().date():
+                    logger.info(f"Rejecting SELL {symbol}: bought today ({entry_dt.strftime('%H:%M')}), PDT lock until next session")
+                    action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "PDT lock: bought today"})
+                    continue
+
             # Pass the trader's reserved cash slice (not raw account cash) so the
             # validator's "not enough cash" check matches the soft reservation above.
             approved, reason = self.risk.validate_order(
