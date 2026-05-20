@@ -28,6 +28,7 @@ TARGET_GAIN_PCT = 50
 CONTRACT_DTE_MIN = 7
 CONTRACT_DTE_MAX = 35
 OPTIONS_WATCHLIST_SIZE = 50    # Expanded from 30 for broader symbol coverage
+MAX_CONTRACTS_PER_POSITION = 3 # Prevent over-concentration in cheap contracts
 
 # Liquidity guardrails
 # Custom tier: spread $1.00, OI 50 — balance of availability vs exit liquidity
@@ -460,7 +461,7 @@ class OptionsBot:
             self.notif.send(f"No contract found: {direction} {symbol}", priority="low")
             return
         contract, premium, dte, _ = result
-        contracts = max(1, int(budget / (premium * 100)))
+        contracts = min(max(1, int(budget / (premium * 100))), MAX_CONTRACTS_PER_POSITION)
         try:
             self.alpaca.trading.submit_order(MarketOrderRequest(
                 symbol=contract.symbol, qty=contracts, side=OrderSide.BUY,

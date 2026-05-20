@@ -316,6 +316,10 @@ class TradingBot:
         stock_unrealized = sum(float(p.unrealized_pl) for p in positions if len(p.symbol) <= 10)
         stock_daily_pl = stock_unrealized + self.risk.daily_pnl
 
+        stock_mv = sum(float(p.qty) * float(p.current_price) for p in positions if len(p.symbol) <= 10)
+        max_stock_deploy = cash * Config.MAX_STOCK_DEPLOYMENT_PCT
+        stock_deploy_pct = (stock_mv / max_stock_deploy * 100) if max_stock_deploy > 0 else 0
+
         technical_analysis = {}
         for symbol in self.watchlist[:100]:
             try:
@@ -337,7 +341,11 @@ class TradingBot:
             "timestamp": datetime.now().isoformat(),
             "market_open": True,
             "daily_pl": stock_daily_pl,
-            "trades_today": self.risk.daily_trades
+            "trades_today": self.risk.daily_trades,
+            "stock_deployment_current": round(stock_mv, 2),
+            "stock_deployment_max": round(max_stock_deploy, 2),
+            "stock_deployment_pct": round(stock_deploy_pct, 1),
+            "stock_deployment_at_cap": stock_mv >= max_stock_deploy * 0.95
         }
 
     def _execute_decisions(self, decisions: dict, portfolio: dict) -> list:
