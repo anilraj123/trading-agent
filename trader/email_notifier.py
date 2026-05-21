@@ -126,7 +126,7 @@ class EmailNotifier:
                 sent = False
                 if self.email_api_key:
                     sent = _send_via_resend(self.email_api_key, self.to_addr, subject, body)
-                elif self.smtp_host and self.password:
+                if not sent and self.smtp_host and self.password:
                     sent = _send_via_smtp(
                         self.smtp_host, self.smtp_port, self.user, self.password,
                         self.from_addr, self.to_addr, subject, body,
@@ -164,7 +164,7 @@ class EmailNotifier:
                 sent = False
                 if self.email_api_key:
                     sent = _send_via_resend(self.email_api_key, self.to_addr, subject, report_body)
-                elif self.smtp_host and self.password:
+                if not sent and self.smtp_host and self.password:
                     sent = _send_via_smtp(
                         self.smtp_host, self.smtp_port, self.user, self.password,
                         self.from_addr, self.to_addr, subject, report_body,
@@ -205,7 +205,7 @@ class EmailNotifier:
                 sent = False
                 if self.email_api_key:
                     sent = _send_via_resend(self.email_api_key, self.to_addr, subject, report_body)
-                elif self.smtp_host and self.password:
+                if not sent and self.smtp_host and self.password:
                     sent = _send_via_smtp(
                         self.smtp_host, self.smtp_port, self.user, self.password,
                         self.from_addr, self.to_addr, subject, report_body,
