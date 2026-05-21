@@ -144,10 +144,16 @@ class LLMEngine:
                     "meets_buy": score.get("meets_buy_threshold", False),
                     "meets_sell": score.get("meets_sell_threshold", False)
                 }
+        stock_deploy = portfolio.get("stock_deployment_current", 0)
+        stock_deploy_max = portfolio.get("stock_deployment_max", 0)
+        stock_deploy_pct = portfolio.get("stock_deployment_pct", 0)
+        at_cap = portfolio.get("stock_deployment_at_cap", False)
+        cap_warning = " — AT CAP, no new buys available" if at_cap else ""
 
         return f"""Portfolio:
 - Total Value: ${portfolio['total_value']:.2f} | Cash: ${portfolio['cash']:.2f}
 - Daily P&L: ${portfolio.get('daily_pl', 0):.2f} | Trades Today: {portfolio.get('trades_today', 0)}
+- Stock Deployment: ${stock_deploy:.0f} of ${stock_deploy_max:.0f} cap ({stock_deploy_pct:.0f}%){cap_warning}
 
 Current Positions:
 {json.dumps(portfolio.get('positions', []), indent=2)}

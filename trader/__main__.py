@@ -316,6 +316,10 @@ class TradingBot:
         stock_unrealized = sum(float(p.unrealized_pl) for p in positions if len(p.symbol) <= 10)
         stock_daily_pl = stock_unrealized + self.risk.daily_pnl
 
+        stock_mv = sum(float(p.qty) * float(p.current_price) for p in positions if len(p.symbol) <= 10)
+        max_stock_deploy = cash * Config.MAX_STOCK_DEPLOYMENT_PCT
+        stock_deploy_pct = (stock_mv / max_stock_deploy * 100) if max_stock_deploy > 0 else 0
+
         technical_analysis = {}
         for symbol in self.watchlist[:100]:
             try:
@@ -337,7 +341,11 @@ class TradingBot:
             "timestamp": datetime.now().isoformat(),
             "market_open": True,
             "daily_pl": stock_daily_pl,
-            "trades_today": self.risk.daily_trades
+            "trades_today": self.risk.daily_trades,
+            "stock_deployment_current": round(stock_mv, 2),
+            "stock_deployment_max": round(max_stock_deploy, 2),
+            "stock_deployment_pct": round(stock_deploy_pct, 1),
+            "stock_deployment_at_cap": stock_mv >= max_stock_deploy * 0.95
         }
 
     def _execute_decisions(self, decisions: dict, portfolio: dict) -> list:
@@ -436,6 +444,16 @@ class TradingBot:
             entry_price = None
             if action == "SELL" and symbol in self.risk.positions:
                 entry_price = self.risk.positions[symbol]["entry_price"]
+
+            # PDT guard: block same-day sells. Positions opened today cannot be
+            # sold until the next trading day. Prevents day-trading flag risk and
+            # stops the bot from opening positions with no exit path.
+            if action == "SELL":
+                entry_dt = self.risk.position_entry_dates.get(symbol)
+                if entry_dt and entry_dt.date() == datetime.now().date():
+                    logger.info(f"Rejecting SELL {symbol}: bought today ({entry_dt.strftime('%H:%M')}), PDT lock until next session")
+                    action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "PDT lock: bought today"})
+                    continue
 
             # Pass the trader's reserved cash slice (not raw account cash) so the
             # validator's "not enough cash" check matches the soft reservation above.
