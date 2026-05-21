@@ -436,7 +436,7 @@ class OptionsBot:
                 return
 
             budget = min(per_pos_budget, total_cap - total_deployed, cash)
-            self._open(signal["symbol"], signal["direction"], budget)
+            self._open(signal["symbol"], signal["direction"], budget, signal.get("reasoning", ""))
 
             if self.cycle_count % self.status_interval == 0:
                 self.notif.send(
@@ -453,8 +453,10 @@ class OptionsBot:
     def _manage_loop(self):
         self._manage_positions()
 
-    def _open(self, symbol, direction, budget):
+    def _open(self, symbol, direction, budget, reasoning=""):
         logger.info(f"Signal: {direction} {symbol}")
+        if reasoning:
+            logger.info(f"Reasoning: {reasoning}")
         result = _find_contract(self.alpaca.trading, self.opt_data, symbol, direction, budget)
         if not result:
             logger.info(f"No suitable contract for {symbol} {direction}")
@@ -470,8 +472,10 @@ class OptionsBot:
             total_cost = premium * 100 * contracts
             self._daily_trades += 1
             self._entry_times[contract.symbol] = datetime.now()
-            save_trade("options", symbol, "BUY", contracts, entry_price=premium, strategy=f"{direction}_{dte}dte")
+            save_trade("options", symbol, "BUY", contracts, entry_price=premium, strategy=f"{direction}_{dte}dte", reason=reasoning)
             msg = f"Bought {contracts} {symbol} {contract.type} ${contract.strike_price:.0f} @ ${premium:.2f} ({dte}dte, ${total_cost:.0f} total)"
+            if reasoning:
+                msg += f"\nReason: {reasoning}"
             logger.info(msg)
             self.notif.send(msg, priority="high")
         except Exception as e:
