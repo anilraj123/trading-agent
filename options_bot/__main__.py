@@ -145,6 +145,13 @@ def _contract_otm_pct(c, price):
     strike = float(c.strike_price)
     return (strike / price - 1) * 100 if c.type == "call" else (1 - strike / price) * 100
 
+def _max_otm_pct(dte):
+    if dte <= 7:    return 3
+    if dte <= 15:   return 5
+    if dte <= 21:   return 10
+    if dte <= 28:   return 20
+    return 35
+
 def _has_viable_option(trading_client, data_client, symbol, budget):
     today_d = date.today()
     price = _underlying_price(symbol)
@@ -172,9 +179,6 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
                 if not _contract_is_otm(c, price):
                     rejected["itm"] += 1
                     continue
-                # OI check + append must run when the contract IS OTM. Previously these
-                # lines were indented one level deeper after a `continue`, so they were
-                # dead code and _has_viable_option always returned False (no new opens).
                 oi = int(getattr(c, "open_interest", 0) or 0)
                 if oi < MIN_OPTION_OI:
                     rejected["low_oi"] += 1
@@ -219,7 +223,7 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
                 continue
             dte = (c.expiration_date - today_d).days
             otm_pct = _contract_otm_pct(c, price)
-            if dte <= 15 and abs(otm_pct) > 5:
+            if abs(otm_pct) > _max_otm_pct(dte):
                 rejected["otm_violation"] += 1
                 continue
             logger.debug(f"{symbol}: Found viable {c.type} ${float(c.strike_price):.0f} @ ${mid:.2f} ({dte} DTE, {oi} OI)")
@@ -293,7 +297,7 @@ def _find_contract(trading_client, data_client, symbol, direction, budget):
             if mid <= 0 or mid * 100 > budget: continue
             dte = (c.expiration_date - today_d).days
             otm_pct = (strike / price - 1) * 100 if direction == "bullish" else (1 - strike / price) * 100
-            if dte <= 15 and abs(otm_pct) > 5: continue
+            if abs(otm_pct) > _max_otm_pct(dte): continue
             candidates.append((c, mid, dte, otm_pct))
         except:
             pass
