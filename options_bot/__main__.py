@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 import json
 import re
@@ -29,6 +30,43 @@ CONTRACT_DTE_MIN = 7
 CONTRACT_DTE_MAX = 35
 OPTIONS_WATCHLIST_SIZE = 50    # Expanded from 30 for broader symbol coverage
 MAX_CONTRACTS_PER_POSITION = 3 # Prevent over-concentration in cheap contracts
+
+# Symbols excluded from options trading (hard block, not sent to LLM)
+OPTIONS_BLACKLIST = [s.strip().upper() for s in os.getenv("OPTIONS_BLACKLIST", "").split(",") if s.strip()]
+
+# Budget-aware blacklist tiers: as equity grows, more symbols become viable.
+# $1,500 (current): full blacklist
+# $5,000:          remove financials (JPM, BAC, V, MA, GS, AXP)
+# $10,000:         remove most large-cap slow movers — ATM options affordable
+# $25,000+:        ditch blacklist entirely, rely on liquidity filters only
+BLACKLIST_TIER_5K = {"JPM", "BAC", "V", "MA", "GS", "AXP"}
+BLACKLIST_TIER_10K = {
+    "GILD","AMGN","BMY","PFE","JNJ","MRK","ABT","MDT","BSX",
+    "LMT","RTX","NOC","GD","HII","TDG","HEI",
+    "HD","LOW","TJX","ROST","YUM",
+    "CMCSA","EA","ATVI",
+    "HON","MMM","EMR","ROK","PH","FTV","ITW","IR","DOV","XYL","CARR","OTIS",
+    "XOM","CVX","COP","EOG","PXD","PSX","BKR",
+    "NEE","DUK","SO","D","AEP","EXC","ES","XEL","WEC","AWK","CMS","LNT","EVRG","PNW","OGE",
+    "AMT","PLD","EQIX","CCI","SPG","O","WELL","AVB","EQR","MAA","UDR","EXR","PSA","IRM","DLR",
+    "PG","KO","PEP","MDLZ","KHC","GIS","K","SJM","CAG","MKC","CLX","CL","CHD","ENR","SPB","HELE",
+    "T","VZ","TMUS","SHEN","USM",
+    "UNH","CI","ELV","MCK","ABC","CAH",
+    "LUMN","CCOI","CVS","HUM","CNC","MOH",
+    "PARA","WBD","PVH","RL","VFC",
+    "TXN","MCHP","ADI","NXPI",
+    "WMT","MS","BLK","C","WFC","ESRX",
+}
+
+def _get_effective_blacklist(equity):
+    blacklist = set(OPTIONS_BLACKLIST)
+    if equity >= 5000:
+        blacklist -= BLACKLIST_TIER_5K
+    if equity >= 10000:
+        blacklist -= BLACKLIST_TIER_10K
+    if equity >= 25000:
+        blacklist = set()
+    return blacklist
 
 # Liquidity guardrails
 # Custom tier: spread $1.00, OI 50 — balance of availability vs exit liquidity
@@ -181,7 +219,7 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
                 continue
             dte = (c.expiration_date - today_d).days
             otm_pct = _contract_otm_pct(c, price)
-            if dte < 15 and abs(otm_pct) > 5:
+            if dte <= 15 and abs(otm_pct) > 5:
                 rejected["otm_violation"] += 1
                 continue
             logger.debug(f"{symbol}: Found viable {c.type} ${float(c.strike_price):.0f} @ ${mid:.2f} ({dte} DTE, {oi} OI)")
@@ -255,7 +293,7 @@ def _find_contract(trading_client, data_client, symbol, direction, budget):
             if mid <= 0 or mid * 100 > budget: continue
             dte = (c.expiration_date - today_d).days
             otm_pct = (strike / price - 1) * 100 if direction == "bullish" else (1 - strike / price) * 100
-            if dte < 15 and abs(otm_pct) > 5: continue
+            if dte <= 15 and abs(otm_pct) > 5: continue
             candidates.append((c, mid, dte, otm_pct))
         except:
             pass
@@ -395,7 +433,9 @@ class OptionsBot:
                 if m:
                     held_symbols.add(m.group(1))
 
-            viable = [s for s in self.watchlist if s not in held_symbols and _has_viable_option(self.alpaca.trading, self.opt_data, s, per_pos_budget)]
+            effective_blacklist = _get_effective_blacklist(equity)
+            logger.info(f"Options blacklist: {len(effective_blacklist)} blocked (equity=${equity:.0f}, tier={'full' if equity < 5000 else '5k' if equity < 10000 else '10k' if equity < 25000 else 'none'})")
+            viable = [s for s in self.watchlist if s not in held_symbols and s not in effective_blacklist and _has_viable_option(self.alpaca.trading, self.opt_data, s, per_pos_budget)]
             if not viable:
                 logger.info(f"No symbols with viable options ({len(self.watchlist)} checked, max spread=${MAX_OPTION_SPREAD:.2f}, min OI={MIN_OPTION_OI})")
                 return
@@ -525,6 +565,7 @@ class OptionsBot:
                 self.notif.send(f"Closed {pos.symbol} at {pnl:.0f}% loss (stop={stop:.0%})", priority="high")
                 self._daily_losses += 1
                 self._entry_times.pop(pos.symbol, None)
+                return  # position is closed — skip min-value floor check below
 
             # Minimum value floor: if a contract is worth < $10, close it out.
             # Prevents holding near-worthless contracts that clutter the portfolio

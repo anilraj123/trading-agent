@@ -36,6 +36,25 @@ Track equity milestones and revisit configuration thresholds as account grows.
 
 ---
 
+### $5,000 Equity
+**Action**: Revisit `OPTIONS_BLACKLIST` — remove financials (V, MA, JPM, BAC, GS, AXP)
+- Code already handles this automatically via `_get_effective_blacklist()` at the $5k tier
+- Verify the runtime blacklist is actually shrinking by checking logs for `effective blacklist` debug message
+
+**Status**: ✅ Auto-handled at runtime
+
+---
+
+### $10,000 Equity
+**Action**: Consider removing most of `OPTIONS_BLACKLIST` — rely on OI/spread filters only
+- Code already handles this: `BLACKLIST_TIER_10K` removes most individual stocks at $10k equity
+- After $10k, only ETFs/commodity ETFs remain blacklisted
+- Evaluate if remaining ETF blacklist should also be removed at this tier
+
+**Status**: ✅ Auto-handled at runtime
+
+---
+
 ## Recent Changes (May 14, 2026)
 
 | Parameter | Old | New | Reason |
@@ -48,7 +67,8 @@ Track equity milestones and revisit configuration thresholds as account grows.
 ---
 
 ## Current Account State
-- **Equity**: ~$840
-- **Options Allocated**: $420 (50% of equity)
-- **Trading Allocated**: $420 (50% of equity)
-- **Next Milestone**: $1,500 (75% growth)
+- **Equity**: ~$1,512
+- **Options Allocated**: $605 (40% of equity)
+- **Trading Allocated**: $544 (60% of trading_capital)
+- **Options Blacklist Tier**: $1,500 (full list active)
+- **Next Milestone**: $5,000 (financials unblocked)
