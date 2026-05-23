@@ -4,7 +4,7 @@ from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetAs
 from alpaca.trading.enums import OrderSide, TimeInForce, AssetStatus, OrderClass
 from alpaca.data import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestBarRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from datetime import datetime, timedelta
 
 from .config import Config
@@ -82,11 +82,11 @@ class AlpacaClient:
         logger.info(f"Position closed: {symbol}")
         return order
 
-    def get_bars(self, symbol: str, days: int = 5):
+    def get_bars(self, symbol: str, days: int = 14):
         start = datetime.now() - timedelta(days=days)
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Minute,
+            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
             start=start
         )
         bars = self.data.get_stock_bars(req)

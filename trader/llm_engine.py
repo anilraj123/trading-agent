@@ -14,25 +14,23 @@ def _build_system_prompt(account_value: float = None) -> str:
 
     return f"""You are an expert AI stock trading assistant. You analyze market data using TECHNICAL ANALYSIS and make precise trading decisions.
 
-TIMEFRAME: Intraday (minute-bar intervals). All indicators computed from 1-minute bars.
-- RSI(14) = 14-bar rolling RSI (≈14 minutes of data)
-- MACD(8/21/5) = fast/slow/signal on minute bars (≈21-minute trend)
-- Momentum(5) = % change over last 5 bars (≈5 minutes)
-- Volume = minute-bar volume vs 20-bar average
+TIMEFRAME: Intraday (5-minute bar intervals). All indicators computed from 5-minute bars.
+- RSI(14) = 14-bar rolling RSI (≈70 minutes of data)
+- MACD(8/21/5) = fast/slow/signal on 5-min bars (≈105-minute trend)
+- Momentum(5) = % change over last 5 bars (≈25 minutes)
+- Volume = 5-min bar volume vs 20-bar average
 
-ACTIVE STRATEGY CONFIG:
+STRATEGY: MOMENTUM-ONLY (no mean-reversion). We trade trending stocks from the discovery feed. Do NOT buy oversold bounces or bounces off Bollinger lower bands.
 
 BUY SIGNALS (Score >= {Config.TA_MIN_BUY_SCORE}):
-- RSI(14) below {Config.TA_RSI_OVERSOLD} = oversold bounce (+{Config.TA_RSI_WEIGHT} points)
 - MACD histogram turning positive = momentum shift (+{Config.TA_MACD_WEIGHT} points)
-- Price at/near Bollinger Band lower edge (+{Config.TA_BB_WEIGHT} points)
 - Positive momentum over last 5 bars (+{Config.TA_MOM_WEIGHT} points)
 - Volume {Config.TA_VOL_THRESHOLD}x above average → score boosted by {Config.TA_VOL_BOOST}x
 - Trend alignment (SMA 10 vs 20) (+{Config.TA_TREND_WEIGHT} points)
 
 SELL SIGNALS (Score >= {Config.TA_MIN_SELL_SCORE}):
-- RSI(14) above {Config.TA_RSI_OVERBOUGHT} = take profits (+{Config.TA_RSI_WEIGHT} points)
-- MACD histogram turning negative = momentum loss (+{Config.TA_MACD_WEIGHT} points)
+- RSI(14) above {Config.TA_RSI_OVERBOUGHT} = overextended momentum, take profits (+{Config.TA_RSI_WEIGHT} points)
+- MACD histogram turning negative = momentum fading (+{Config.TA_MACD_WEIGHT} points)
 - Price at/near Bollinger Band upper edge (+{Config.TA_BB_WEIGHT} points)
 - Negative momentum over last 5 bars (+{Config.TA_MOM_WEIGHT} points)
 
@@ -149,6 +147,18 @@ class LLMEngine:
         stock_deploy_pct = portfolio.get("stock_deployment_pct", 0)
         at_cap = portfolio.get("stock_deployment_at_cap", False)
         cap_warning = " — AT CAP, no new buys available" if at_cap else ""
+        top_candidates = portfolio.get("top_candidates", [])
+        news_context = portfolio.get("news_context", {})
+
+        candidate_block = "No strong candidates this cycle."
+        if top_candidates:
+            candidate_data = {s: ta_formatted.get(s, {}) for s in top_candidates if s in ta_formatted}
+            if candidate_data:
+                candidate_block = json.dumps(candidate_data, indent=2)
+
+        news_block = "None available"
+        if news_context:
+            news_block = json.dumps(news_context, indent=2)
 
         return f"""Portfolio:
 - Total Value: ${portfolio['total_value']:.2f} | Cash: ${portfolio['cash']:.2f}
@@ -158,19 +168,23 @@ class LLMEngine:
 Current Positions:
 {json.dumps(portfolio.get('positions', []), indent=2)}
 
-Technical Analysis for Watchlist ({len(ta_formatted)} stocks):
-{json.dumps(ta_formatted, indent=2)}
+Top Candidates (pre-scored by momentum, highest buy_score):
+{candidate_block}
+
+News & Catalysts:
+{news_block}
 
 Market Open: {portfolio.get('market_open', False)}
+SPY Regime: {"BLOCKED (RSI < 40) — no new buys allowed" if portfolio.get("spy_regime_blocked") else "Normal (RSI >= 40) — trades permitted"}
+SPY RSI(14): {portfolio.get("spy_rsi_14", "N/A")}
 
 DECISION RULES:
-1. BUY when buy_score >= {Config.TA_MIN_BUY_SCORE} (RSI < {Config.TA_RSI_OVERSOLD} + confirmations)
-2. SELL when sell_score >= {Config.TA_MIN_SELL_SCORE} (RSI > {Config.TA_RSI_OVERBOUGHT} + confirmations)
+1. BUY when buy_score >= {Config.TA_MIN_BUY_SCORE} (momentum confirmation signals)
+2. SELL when sell_score >= {Config.TA_MIN_SELL_SCORE} (momentum fading or overextended)
 3. Use stop loss at {Config.TA_STOP_LOSS_PCT:.0%} from entry price
 4. Position size max ${account_value * Config.RISK_MAX_POSITION_PCT:.0f} ({Config.RISK_MAX_POSITION_PCT:.0%} of account)
-5. All indicators are on 1-minute bars — MACD(8/21/5) captures ~21-min trends, momentum(5) ~5 min
-6. Only trade stocks with clear technical signals
+5. All indicators are on 5-minute bars — MACD(8/21/5) captures ~105-min trends, momentum(5) ~25 min
+6. Only trade stocks with clear momentum signals (no mean-reversion plays)
+7. Evaluate each top candidate — consider news catalysts alongside TA signals
 
-The buy_score and sell_score are pre-computed using the config weights. Use them as ground truth for your decisions.
-
-Provide decisions only for stocks meeting the buy/sell criteria."""
+The buy_score and sell_score are pre-computed using the config weights. Use them as ground truth for your decisions. Focus on the top candidates above. You may also suggest trades from your current positions (sell decisions)."""
