@@ -145,13 +145,6 @@ def _contract_otm_pct(c, price):
     strike = float(c.strike_price)
     return (strike / price - 1) * 100 if c.type == "call" else (1 - strike / price) * 100
 
-def _max_otm_pct(dte):
-    if dte <= 7:    return 3
-    if dte <= 15:   return 5
-    if dte <= 21:   return 10
-    if dte <= 28:   return 20
-    return 35
-
 def _has_viable_option(trading_client, data_client, symbol, budget):
     today_d = date.today()
     price = _underlying_price(symbol)
@@ -223,7 +216,13 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
                 continue
             dte = (c.expiration_date - today_d).days
             otm_pct = _contract_otm_pct(c, price)
-            if abs(otm_pct) > _max_otm_pct(dte):
+            if dte <= 15 and abs(otm_pct) > 5:
+                rejected["otm_violation"] += 1
+                continue
+            elif dte <= 21 and abs(otm_pct) > 10:
+                rejected["otm_violation"] += 1
+                continue
+            elif dte <= 35 and abs(otm_pct) > 15:
                 rejected["otm_violation"] += 1
                 continue
             logger.debug(f"{symbol}: Found viable {c.type} ${float(c.strike_price):.0f} @ ${mid:.2f} ({dte} DTE, {oi} OI)")
@@ -297,7 +296,9 @@ def _find_contract(trading_client, data_client, symbol, direction, budget):
             if mid <= 0 or mid * 100 > budget: continue
             dte = (c.expiration_date - today_d).days
             otm_pct = (strike / price - 1) * 100 if direction == "bullish" else (1 - strike / price) * 100
-            if abs(otm_pct) > _max_otm_pct(dte): continue
+            if dte <= 15 and abs(otm_pct) > 5: continue
+            elif dte <= 21 and abs(otm_pct) > 10: continue
+            elif dte <= 35 and abs(otm_pct) > 15: continue
             candidates.append((c, mid, dte, otm_pct))
         except:
             pass

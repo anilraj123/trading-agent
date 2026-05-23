@@ -97,17 +97,11 @@ class TechnicalAnalysis:
         components = {}
 
         rsi = ta_data.get("rsi_14", 50.0)
-        rsi_os = Config.TA_RSI_OVERSOLD
         rsi_ob = Config.TA_RSI_OVERBOUGHT
-        if rsi < rsi_os:
-            rsi_buy_grade = max(0.0, min(1.0, (rsi_os - rsi) / rsi_os))
-        else:
-            rsi_buy_grade = 0.0
         if rsi > rsi_ob:
             rsi_sell_grade = max(0.0, min(1.0, (rsi - rsi_ob) / (100 - rsi_ob)))
         else:
             rsi_sell_grade = 0.0
-        components["rsi_buy"] = rsi_buy_grade * Config.TA_RSI_WEIGHT
         components["rsi_sell"] = rsi_sell_grade * Config.TA_RSI_WEIGHT
 
         macd = ta_data.get("macd", {})
@@ -120,17 +114,11 @@ class TechnicalAnalysis:
 
         bb = ta_data.get("bollinger_bands", {})
         bb_pos = bb.get("position", 0.5) if isinstance(bb, dict) else 0.5
-        bb_lower = Config.TA_BB_LOWER_THRESHOLD
         bb_upper = Config.TA_BB_UPPER_THRESHOLD
-        if bb_pos < bb_lower:
-            bb_buy_grade = max(0.0, min(1.0, (bb_lower - bb_pos) / bb_lower))
-        else:
-            bb_buy_grade = 0.0
         if bb_pos > bb_upper:
             bb_sell_grade = max(0.0, min(1.0, (bb_pos - bb_upper) / (1 - bb_upper)))
         else:
             bb_sell_grade = 0.0
-        components["bb_buy"] = bb_buy_grade * Config.TA_BB_WEIGHT
         components["bb_sell"] = bb_sell_grade * Config.TA_BB_WEIGHT
 
         sma_10 = ta_data.get("sma_10", None)
@@ -158,8 +146,7 @@ class TechnicalAnalysis:
         vol_boost = Config.TA_VOL_BOOST if vol_ratio > Config.TA_VOL_THRESHOLD else 1.0
         components["volume_mult"] = vol_boost
 
-        buy_score = (components["rsi_buy"] + components["macd_buy"] +
-                     components["bb_buy"] + components["trend_buy"] +
+        buy_score = (components["macd_buy"] + components["trend_buy"] +
                      components["momentum_buy"]) * vol_boost
 
         sell_score = (components["rsi_sell"] + components["macd_sell"] +

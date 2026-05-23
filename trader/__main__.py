@@ -184,6 +184,13 @@ class TradingBot:
                 save_trade("trading", sym, "EXPIRY CLOSE", qty, entry_price=entry_p, exit_price=curr_p, pnl_pct=pnl_pct, pnl_dollars=dollar_pnl)
                 self.notif.send(f"Expired: sold {sym} after {Config.RISK_MAX_HOLDING_DAYS} days (PnL: {pnl_pct:+.2f}%)")
 
+            spy_rsi = portfolio.get("spy_rsi_14")
+            if spy_rsi is not None and spy_rsi < 40:
+                logger.warning(f"SPY regime filter active — pausing new buys (SPY RSI={spy_rsi:.1f})")
+                portfolio["spy_regime_blocked"] = True
+            else:
+                portfolio["spy_regime_blocked"] = False
+
             decisions, llm_prompt, llm_response = self.llm.get_trading_decision(portfolio, account_value=self.trading_capital)
             if "error" in decisions:
                 self.notif.send(f"LLM parse error: {decisions.get('summary')}", priority="high")
@@ -238,7 +245,7 @@ class TradingBot:
             else:
                 apy = 0
 
-            spy_bars = self.alpaca.get_bars('SPY', days=max(3, days_elapsed + 5))
+            spy_bars = self.alpaca.get_bars('SPY')
             spy_apy = 0
             spy_return_pct = 0
             # Default spy_value to starting equity (i.e., "SPY flat") so the f-string below
@@ -323,15 +330,59 @@ class TradingBot:
         technical_analysis = {}
         for symbol in self.watchlist[:100]:
             try:
-                bars = self.alpaca.get_bars(symbol, days=7)
+                bars = self.alpaca.get_bars(symbol)
                 if bars is not None and len(bars) > 50:
                     technical_analysis[symbol] = self.ta.compute_all(bars)
             except Exception as e:
                 logger.debug(f"TA failed for {symbol}: {e}")
 
+        # Rank by momentum buy_score — shrink watchlist to 30 best candidates
+        scored = [(s, d.get("score", {}).get("buy_score", 0)) for s, d in technical_analysis.items() if d]
+        scored.sort(key=lambda x: -x[1])
+        self.watchlist = [s for s, _ in scored[:30]]
+        logger.info(f"Ranked watchlist: {len(self.watchlist)} momentum names (top by buy_score)")
+
+        # Identify top 5 candidates that meet the buy threshold for LLM focus
+        buy_threshold = Config.TA_MIN_BUY_SCORE
+        top_candidates = [s for s, _ in scored[:5] if technical_analysis[s].get("score", {}).get("buy_score", 0) >= buy_threshold]
+        if not top_candidates and scored:
+            top_candidates = [s for s, _ in scored[:5]]
+
+        # Fetch Alpaca news headlines for top 5 candidates
+        news_context = {}
+        if top_candidates:
+            for sym in top_candidates:
+                try:
+                    from alpaca.data.historical.news import NewsClient
+                    from alpaca.data.requests import NewsRequest
+                    nc = NewsClient(Config.ALPACA_API_KEY, Config.ALPACA_SECRET_KEY)
+                    req = NewsRequest(symbols=sym, limit=2, exclude_contentless=True)
+                    articles = nc.get_news(req)
+                    headlines = []
+                    if hasattr(articles, "data"):
+                        for article in articles.data.get(sym, []):
+                            if hasattr(article, "headline") and article.headline:
+                                headlines.append(article.headline)
+                    news_context[sym] = headlines
+                except Exception as e:
+                    logger.debug(f"News fetch failed for {sym}: {e}")
+                    news_context[sym] = []
+
+        spy_rsi_14 = None
+        try:
+            spy_bars = self.alpaca.get_bars("SPY")
+            if spy_bars is not None and len(spy_bars) > 20:
+                spy_rsi_14 = TechnicalAnalysis.rsi(spy_bars["close"], 14)
+        except Exception as e:
+            logger.debug(f"SPY RSI failed: {e}")
+
         return {
             "total_value": total_value,
             "cash": cash,
+            "spy_rsi_14": spy_rsi_14,
+            "spy_regime_blocked": False,
+            "top_candidates": top_candidates,
+            "news_context": news_context,
             "positions": [
                 {"symbol": p.symbol, "qty": float(p.qty), "market_value": float(p.market_value),
                  "avg_entry_price": float(p.avg_entry_price), "unrealized_pl": float(p.unrealized_pl)}
@@ -444,6 +495,12 @@ class TradingBot:
             entry_price = None
             if action == "SELL" and symbol in self.risk.positions:
                 entry_price = self.risk.positions[symbol]["entry_price"]
+
+            # SPY regime filter: block new buys when broad market is weak.
+            if action == "BUY" and portfolio.get("spy_regime_blocked"):
+                logger.info(f"Rejecting BUY {symbol}: SPY regime filter active (SPY RSI < 40)")
+                action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "SPY regime filter"})
+                continue
 
             # PDT guard: block same-day sells. Positions opened today cannot be
             # sold until the next trading day. Prevents day-trading flag risk and
