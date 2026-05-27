@@ -311,14 +311,17 @@ def _find_contract(trading_client, data_client, symbol, direction, budget):
 def _get_signal(llm, summary, watchlist):
     allocated = summary['equity'] * ALLOCATED_PCT
     per_pos_budget = allocated * PER_POSITION_PCT
-    prompt = f"""You are an options trader. Analyze:
+    prompt = f"""You are an options trader specializing in momentum directionals (long calls/puts). Analyze:
 - Account: ${summary['equity']:.0f} total, ${allocated:.0f} allocated to options
 - Max premium per position: ~${per_pos_budget:.0f}
 - Watchlist ({len(watchlist)} stocks): {', '.join(watchlist)}
 - Open options: {summary.get('open_options', 0)}
 - SPY daily change: {summary.get('spy_pct', 'N/A')}%
 
-Pick ONE symbol and direction. Respond JSON only:
+Theta decay accelerates significantly below 15 DTE. Consider proactive profit-taking on existing positions at <15 DTE even before the +50% target. A +27% gain at 10 DTE may be better realized than held through rapid theta decay.
+
+Pick ONE symbol and direction from the watchlist (or hold).
+Respond JSON only:
 {{"symbol": "SPY", "direction": "bullish|bearish|hold", "reasoning": "reason"}}"""
     try:
         content = llm.call(messages=[{"role": "user", "content": prompt}], max_tokens=200)

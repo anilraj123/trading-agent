@@ -185,11 +185,15 @@ class TradingBot:
                 self.notif.send(f"Expired: sold {sym} after {Config.RISK_MAX_HOLDING_DAYS} days (PnL: {pnl_pct:+.2f}%)")
 
             spy_rsi = portfolio.get("spy_rsi_14")
-            if spy_rsi is not None and spy_rsi < 40:
-                logger.warning(f"SPY regime filter active — pausing new buys (SPY RSI={spy_rsi:.1f})")
-                portfolio["spy_regime_blocked"] = True
+            if spy_rsi is not None and spy_rsi < 30:
+                logger.warning(f"SPY regime: HARD BLOCK (RSI={spy_rsi:.1f})")
+                portfolio["spy_regime_mode"] = "blocked"
+            elif spy_rsi is not None and spy_rsi < 40:
+                logger.info(f"SPY regime: REDUCED (RSI={spy_rsi:.1f}, 50% position size, min buy_score 3.0)")
+                portfolio["spy_regime_mode"] = "reduced"
             else:
-                portfolio["spy_regime_blocked"] = False
+                portfolio["spy_regime_mode"] = "normal"
+            self._last_regime_mode = portfolio["spy_regime_mode"]
 
             decisions, llm_prompt, llm_response = self.llm.get_trading_decision(portfolio, account_value=self.trading_capital)
             if "error" in decisions:
@@ -296,6 +300,8 @@ class TradingBot:
                 positions_dict, spy_return_pct, apy, spy_apy
             )
 
+            # Fetch the regime mode that was set during the last cycle.
+            regime_mode = getattr(self, '_last_regime_mode', 'normal')
             self.notif.send(
                 f"DAILY SUMMARY - {today.strftime('%b %d')}\n"
                 f"Portfolio: ${current_value:.2f}\n"
@@ -303,6 +309,7 @@ class TradingBot:
                 f"Open Positions: {pos_count}\n"
                 f"Today's Trades: {self.risk.daily_trades} (W:{wins}/L:{losses})\n"
                 f"Day P&L: ${daily_pnl:+.2f}\n"
+                f"Regime: {regime_mode.upper()}\n"
                 f"\n"
                 f"vs SPY Buy & Hold ($200 invested):\n"
                 f"SPY Return: {spy_return_pct:+.2f}% | SPY Value: ${spy_value:.2f}\n"
@@ -380,7 +387,7 @@ class TradingBot:
             "total_value": total_value,
             "cash": cash,
             "spy_rsi_14": spy_rsi_14,
-            "spy_regime_blocked": False,
+            "spy_regime_mode": "normal",
             "top_candidates": top_candidates,
             "news_context": news_context,
             "positions": [
@@ -496,11 +503,23 @@ class TradingBot:
             if action == "SELL" and symbol in self.risk.positions:
                 entry_price = self.risk.positions[symbol]["entry_price"]
 
-            # SPY regime filter: block new buys when broad market is weak.
-            if action == "BUY" and portfolio.get("spy_regime_blocked"):
-                logger.info(f"Rejecting BUY {symbol}: SPY regime filter active (SPY RSI < 40)")
-                action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "SPY regime filter"})
+            # SPY regime filter: tiered response to broad market weakness.
+            regime = portfolio.get("spy_regime_mode", "normal")
+            if action == "BUY" and regime == "blocked":
+                logger.info(f"Rejecting BUY {symbol}: SPY hard block (RSI < 30)")
+                action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "SPY hard block"})
                 continue
+            if action == "BUY" and regime == "reduced":
+                ta = portfolio.get("technical_analysis", {})
+                sym_ta = ta.get(symbol, {})
+                sym_buy_score = sym_ta.get("score", {}).get("buy_score", 0) if sym_ta else 0
+                if sym_buy_score < 3.0:
+                    logger.info(f"Rejecting BUY {symbol}: SPY reduced regime — buy_score {sym_buy_score:.2f} < 3.0")
+                    action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "SPY reduced regime"})
+                    continue
+                quantity = round(quantity * 0.5, 4)
+                decision["quantity"] = quantity
+                logger.info(f"SPY reduced regime: halved {symbol} qty to {quantity} (buy_score={sym_buy_score:.2f})")
 
             # PDT guard: block same-day sells. Positions opened today cannot be
             # sold until the next trading day. Prevents day-trading flag risk and
