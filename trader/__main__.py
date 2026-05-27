@@ -204,7 +204,11 @@ class TradingBot:
             decisions, llm_prompt, llm_response = self.llm.get_trading_decision(portfolio, account_value=self.trading_capital)
             if "error" in decisions:
                 self.notif.send(f"LLM parse error: {decisions.get('summary')}", priority="high")
-            actions_taken = self._execute_decisions(decisions, portfolio)
+            try:
+                actions_taken = self._execute_decisions(decisions, portfolio)
+            except Exception as e:
+                logger.error(f"Executing decisions failed (LLM report still sent): {e}")
+                actions_taken = []
             self.email_notifier.send_llm_report(
                 system_prompt=llm_prompt.split("USER:\n", 1)[0].replace("SYSTEM:\n", ""),
                 user_prompt=llm_prompt.split("USER:\n", 1)[1] if "USER:\n" in llm_prompt else llm_prompt,
