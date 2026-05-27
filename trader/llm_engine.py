@@ -49,7 +49,7 @@ OUTPUT FORMAT (JSON only, no extra text):
       "action": "BUY|SELL|HOLD",
       "quantity": 0.5,
       "confidence": 0.85,
-      "strategy": "mean_reversion|momentum|risk_management",
+      "strategy": "momentum|risk_management",
       "reasoning": "RSI at 22 (oversold) + positive MACD crossover suggests bounce"
     }}
   ],
@@ -175,7 +175,7 @@ News & Catalysts:
 {news_block}
 
 Market Open: {portfolio.get('market_open', False)}
-SPY Regime: {"BLOCKED (RSI < 40) — no new buys allowed" if portfolio.get("spy_regime_blocked") else "Normal (RSI >= 40) — trades permitted"}
+SPY Regime: {"BLOCKED (RSI < 30) — no new buys allowed" if portfolio.get("spy_regime_mode") == "blocked" else "REDUCED (RSI 30-40) — 50% position size, buy_score >= 3.0" if portfolio.get("spy_regime_mode") == "reduced" else "Normal (RSI >= 40) — trades permitted"}
 SPY RSI(14): {portfolio.get("spy_rsi_14", "N/A")}
 
 DECISION RULES:
