@@ -61,6 +61,10 @@ class TradingBot:
         self.total_known_deposits = sum(self.known_deposits)
         current_equity = self.alpaca.get_portfolio_value()
         self.account_value = current_equity - self.total_known_deposits
+
+        init_positions = self.alpaca.get_positions()
+        init_stock_positions = [p for p in init_positions if len(p.symbol) <= 10]
+        self.risk.sync_from_alpaca(init_stock_positions)
         self.day_start_value = self.account_value
         # REALLOCATED: 60% to trading, 40% to options (restarted at ~$1.7k equity)
         self.trading_capital_allocation = 0.60  # 60% trading, 40% options
@@ -145,6 +149,8 @@ class TradingBot:
 
             portfolio = self._gather_portfolio_data()
             positions = self.alpaca.get_positions()
+            stock_positions = [p for p in positions if len(p.symbol) <= 10]
+            self.risk.sync_from_alpaca(stock_positions)
 
             can_trade, reason = self.risk.can_trade(self.trading_capital)
             if not can_trade:

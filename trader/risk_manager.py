@@ -148,6 +148,37 @@ class RiskManager:
     def get_stop_loss_price(self, entry_price: float) -> float:
         return round(entry_price * (1 + Config.TA_STOP_LOSS_PCT), 2)
 
+    def sync_from_alpaca(self, positions: list):
+        """Populate risk-manager state from Alpaca positions for symbols not
+        already tracked. Gives stop-loss, expiry, and PDT coverage to positions
+        opened manually or before bot restart. Bot-registered entries are
+        preserved (they have accurate entry timestamps)."""
+        now = datetime.now()
+        alpaca_symbols = set()
+        for pos in positions:
+            symbol = pos.symbol
+            alpaca_symbols.add(symbol)
+            if symbol not in self.positions:
+                try:
+                    entry_price = float(pos.avg_entry_price)
+                    qty = float(pos.qty)
+                    stop_loss = entry_price * (1 + Config.TA_STOP_LOSS_PCT)
+                    self.positions[symbol] = {
+                        "entry_price": entry_price,
+                        "stop_loss": stop_loss,
+                        "quantity": qty,
+                        "date": now
+                    }
+                    self.position_entry_dates[symbol] = now
+                    logger.info(f"Synced {symbol} from Alpaca: entry=${entry_price:.2f} stop=${stop_loss:.2f}")
+                except (ValueError, AttributeError) as e:
+                    logger.debug(f"Could not sync {symbol}: {e}")
+
+        for symbol in list(self.positions.keys()):
+            if symbol not in alpaca_symbols:
+                self.positions.pop(symbol, None)
+                self.position_entry_dates.pop(symbol, None)
+
     def get_status(self, portfolio_value: float = None) -> dict:
         pv = portfolio_value if portfolio_value else Config.SIMULATED_ACCOUNT_SIZE
         daily_loss_limit = Config.RISK_DAILY_LOSS_LIMIT / 100 * pv

@@ -396,6 +396,14 @@ class OptionsBot:
         try:
             positions = self.alpaca.get_positions()
             opt_positions = [p for p in positions if len(p.symbol) > 10]
+            now_dt = datetime.now()
+            for pos in opt_positions:
+                if pos.symbol not in self._entry_times:
+                    self._entry_times[pos.symbol] = now_dt
+            held = {p.symbol for p in opt_positions}
+            for sym in list(self._entry_times.keys()):
+                if sym not in held:
+                    self._entry_times.pop(sym, None)
             for pos in opt_positions:
                 self._manage(pos)
             total_deployed = sum(float(p.avg_entry_price) * float(p.qty) * 100 for p in opt_positions)
