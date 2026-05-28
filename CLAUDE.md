@@ -61,3 +61,7 @@ Tests: none. The "backtest_*.py" scripts at the repo root are exploratory/resear
 - Don't add a parameter without also adding it to `PARAMETERS.md` and (if user-tunable) to `trader/config.py` with an env-var fallback.
 - The bots talk to the same Alpaca account. Anything that reads positions must distinguish equity (`len(p.symbol) <= 10`) from options (`> 10`) — the options bot already does this; don't break it from the equity side.
 - Both bots assume market-hours scheduling via `schedule.every(N).minutes.do(...)` and short-circuit on `alpaca.get_market_status()`. Don't move to a fixed cron unless you also handle the market-closed case.
+
+## Git
+
+This repo lives at `/home/anilraj/code/ai/trading-agent/` on the dev machine, branch `expand-options-watchlist`. All code changes go through this repo — commit here first, then deploy to the droplet.

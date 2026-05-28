@@ -160,13 +160,15 @@ class LLMEngine:
         if news_context:
             news_block = json.dumps(news_context, indent=2)
 
+        stock_positions = [p for p in portfolio.get('positions', []) if len(p.get('symbol', '')) <= 10]
+
         return f"""Portfolio:
 - Total Value: ${portfolio['total_value']:.2f} | Cash: ${portfolio['cash']:.2f}
 - Daily P&L: ${portfolio.get('daily_pl', 0):.2f} | Trades Today: {portfolio.get('trades_today', 0)}
 - Stock Deployment: ${stock_deploy:.0f} of ${stock_deploy_max:.0f} cap ({stock_deploy_pct:.0f}%){cap_warning}
 
 Current Positions:
-{json.dumps(portfolio.get('positions', []), indent=2)}
+{json.dumps(stock_positions, indent=2)}
 
 Top Candidates (pre-scored by momentum, highest buy_score):
 {candidate_block}
