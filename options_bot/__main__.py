@@ -662,7 +662,7 @@ class OptionsBot:
                 self._entry_times.pop(pos.symbol, None)
                 return
             # Rule 2: Tight stop at <= 14 DTE for winners
-            if dte <= DTE_TIGHT_STOP_THRESHOLD and pnl > 0 and pnl <= TIGHT_STOP_PCT * 100:
+            if dte <= DTE_TIGHT_STOP_THRESHOLD and pnl <= TIGHT_STOP_PCT * 100:
                 self.alpaca.trading.close_position(pos.symbol)
                 dollar_pnl = (cp - ep) * float(pos.qty) * 100
                 save_trade("options", pos.symbol, "TIGHT_STOP", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
