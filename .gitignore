@@ -64,3 +64,4 @@ send_comparison.py
 *.backup
 rclone-config/
 
+*.tar.gz
