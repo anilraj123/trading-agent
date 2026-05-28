@@ -3,12 +3,16 @@ import os
 import time
 import json
 import re
+import csv
 import schedule
 from datetime import datetime, timedelta, date
+import numpy as np
+import pandas as pd
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest, GetOptionContractsRequest
-from alpaca.data import OptionHistoricalDataClient
-from alpaca.data.requests import OptionSnapshotRequest
+from alpaca.data import OptionHistoricalDataClient, StockHistoricalDataClient
+from alpaca.data.requests import OptionSnapshotRequest, StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
 
 from trader.config import Config
 from trader.alpaca_client import AlpacaClient
@@ -22,14 +26,25 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefm
 logger = logging.getLogger("options")
 
 ALLOCATED_PCT = 0.40           # 40% allocated (~$340 at current equity, ~$85/position)
-                                # Custom tier: spread $1.00, OI 50
 PER_POSITION_PCT = 0.20        # 20% of allocated per position (~$66 at current equity, 2-3 positions)
 TOTAL_DEPLOYED_PCT = 0.50      # 50% of allocated total cap
 TARGET_GAIN_PCT = 50
 CONTRACT_DTE_MIN = 7
 CONTRACT_DTE_MAX = 35
-OPTIONS_WATCHLIST_SIZE = 50    # Expanded from 30 for broader symbol coverage
-MAX_CONTRACTS_PER_POSITION = 3 # Prevent over-concentration in cheap contracts
+OPTIONS_WATCHLIST_SIZE = 50
+MAX_CONTRACTS_PER_POSITION = 3
+
+MAX_OPTIONS_POSITIONS = 2
+MIN_OPTION_OI = 200
+MAX_OPTION_SPREAD = 0.25
+MIN_CONTRACT_VALUE = 15
+MIN_IV = 0.35
+MAX_OTM_PCT_7_14 = 3
+MAX_OTM_PCT_14_21 = 5
+MAX_OTM_PCT_21_35 = 8
+DTE_TIGHT_STOP_THRESHOLD = 14
+TIGHT_STOP_PCT = -0.15
+HARD_EXIT_DTE = 14
 
 # Symbols excluded from options trading (hard block, not sent to LLM)
 OPTIONS_BLACKLIST = [s.strip().upper() for s in os.getenv("OPTIONS_BLACKLIST", "").split(",") if s.strip()]
@@ -68,11 +83,6 @@ def _get_effective_blacklist(equity):
         blacklist = set()
     return blacklist
 
-# Liquidity guardrails
-# Custom tier: spread $1.00, OI 50 — balance of availability vs exit liquidity
-MIN_OPTION_OI = 50
-MAX_OPTION_SPREAD = 1.00
-
 class NotificationManager(BaseNotif):
     def send(self, message, priority="normal"):
         msg = f"[OPTIONS] {message}"
@@ -81,9 +91,6 @@ class NotificationManager(BaseNotif):
 
 def _underlying_price(symbol):
     try:
-        from alpaca.data import StockHistoricalDataClient
-        from alpaca.data.requests import StockBarsRequest
-        from alpaca.data.timeframe import TimeFrame
         stock_data = StockHistoricalDataClient(Config.ALPACA_API_KEY, Config.ALPACA_SECRET_KEY)
         bars = stock_data.get_stock_bars(StockBarsRequest(
             symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
@@ -118,7 +125,7 @@ def _force_exit_near_expiry(dte):
         return False
     if dte <= 3:
         now = datetime.now()
-        if now.hour >= 15:  # within last hour of market (market closes 4pm ET)
+        if now.hour >= 15:
             return True
     return False
 
@@ -145,6 +152,26 @@ def _contract_otm_pct(c, price):
     strike = float(c.strike_price)
     return (strike / price - 1) * 100 if c.type == "call" else (1 - strike / price) * 100
 
+def _get_snapshot_iv(snap):
+    try:
+        if isinstance(snap, dict):
+            return float(snap.get("implied_volatility") or 0)
+        return float(getattr(snap, "implied_volatility", 0) or 0)
+    except:
+        return 0.0
+
+def _record_iv_snapshot(symbol, iv):
+    path = "/app/data/iv_history.csv"
+    write_header = not os.path.exists(path)
+    try:
+        with open(path, "a", newline="") as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(["date", "symbol", "iv"])
+            writer.writerow([date.today().isoformat(), symbol, round(iv, 4)])
+    except Exception as e:
+        logger.warning(f"Failed to write IV history for {symbol}: {e}")
+
 def _has_viable_option(trading_client, data_client, symbol, budget):
     today_d = date.today()
     price = _underlying_price(symbol)
@@ -152,7 +179,7 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
         return False
 
     total_contracts = 0
-    rejected = {"no_price": 0, "itm": 0, "low_oi": 0, "wide_spread": 0, "budget": 0, "otm_violation": 0}
+    rejected = {"no_price": 0, "itm": 0, "low_oi": 0, "wide_spread": 0, "budget": 0, "otm_violation": 0, "low_iv": 0}
     otm_contracts = []
 
     for start_dte, end_dte in [(7, 10), (11, 14), (15, 18), (19, 21), (22, 25), (26, 28), (29, 32), (33, CONTRACT_DTE_MAX)]:
@@ -214,18 +241,23 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
             if mid <= 0 or mid * 100 > budget:
                 rejected["budget"] += 1
                 continue
+            iv = _get_snapshot_iv(snap)
+            _record_iv_snapshot(symbol, iv)
+            if iv < MIN_IV:
+                rejected["low_iv"] += 1
+                continue
             dte = (c.expiration_date - today_d).days
             otm_pct = _contract_otm_pct(c, price)
-            if dte <= 15 and abs(otm_pct) > 5:
+            if dte <= 14 and abs(otm_pct) > MAX_OTM_PCT_7_14:
                 rejected["otm_violation"] += 1
                 continue
-            elif dte <= 21 and abs(otm_pct) > 10:
+            elif dte <= 21 and abs(otm_pct) > MAX_OTM_PCT_14_21:
                 rejected["otm_violation"] += 1
                 continue
-            elif dte <= 35 and abs(otm_pct) > 15:
+            elif dte <= 35 and abs(otm_pct) > MAX_OTM_PCT_21_35:
                 rejected["otm_violation"] += 1
                 continue
-            logger.debug(f"{symbol}: Found viable {c.type} ${float(c.strike_price):.0f} @ ${mid:.2f} ({dte} DTE, {oi} OI)")
+            logger.debug(f"{symbol}: Found viable {c.type} ${float(c.strike_price):.0f} @ ${mid:.2f} ({dte} DTE, {oi} OI, IV={iv:.2f})")
             return True
         except:
             pass
@@ -294,11 +326,14 @@ def _find_contract(trading_client, data_client, symbol, direction, budget):
             if ask - bid > MAX_OPTION_SPREAD: continue
             mid = (bid + ask) / 2
             if mid <= 0 or mid * 100 > budget: continue
+            iv = _get_snapshot_iv(snap)
+            _record_iv_snapshot(symbol, iv)
+            if iv < MIN_IV: continue
             dte = (c.expiration_date - today_d).days
             otm_pct = (strike / price - 1) * 100 if direction == "bullish" else (1 - strike / price) * 100
-            if dte <= 15 and abs(otm_pct) > 5: continue
-            elif dte <= 21 and abs(otm_pct) > 10: continue
-            elif dte <= 35 and abs(otm_pct) > 15: continue
+            if dte <= 14 and abs(otm_pct) > MAX_OTM_PCT_7_14: continue
+            elif dte <= 21 and abs(otm_pct) > MAX_OTM_PCT_14_21: continue
+            elif dte <= 35 and abs(otm_pct) > MAX_OTM_PCT_21_35: continue
             candidates.append((c, mid, dte, otm_pct))
         except:
             pass
@@ -318,7 +353,17 @@ def _get_signal(llm, summary, watchlist):
 - Open options: {summary.get('open_options', 0)}
 - SPY daily change: {summary.get('spy_pct', 'N/A')}%
 
-Theta decay accelerates significantly below 15 DTE. Consider proactive profit-taking on existing positions at <15 DTE even before the +50% target. A +27% gain at 10 DTE may be better realized than held through rapid theta decay.
+ENTRY REQUIREMENTS (all must be met):
+- Daily trend: EMA9 > EMA21 for 3 of last 5 days, RSI 50-75
+- IV >= 0.35 (stock must have sufficient volatility)
+- Max 2 options positions total at any time
+- OTM limits: 8% at 21-35 DTE, 5% at 14-21 DTE, 3% at 7-14 DTE
+
+EXIT DISCIPLINE:
+- Take profit at +50%
+- If DTE <= 14 and position is losing: exit immediately, theta will destroy value
+- If DTE <= 14 and position is profitable: protect with -15% tight stop
+- Never hold a losing position past 14 DTE
 
 Pick ONE symbol and direction from the watchlist (or hold).
 Respond JSON only:
@@ -339,6 +384,7 @@ class OptionsBot:
     def __init__(self):
         self.alpaca = AlpacaClient()
         self.opt_data = OptionHistoricalDataClient(Config.ALPACA_API_KEY, Config.ALPACA_SECRET_KEY)
+        self.stock_data = StockHistoricalDataClient(Config.ALPACA_API_KEY, Config.ALPACA_SECRET_KEY)
         self.llm = LLMEngine()
         self.notif = NotificationManager(provider=Config.NOTIFY_PROVIDER, config=Config.get_notification_config())
         self.starting_value = self.alpaca.get_portfolio_value()
@@ -354,19 +400,61 @@ class OptionsBot:
         self._daily_trades = 0
         self._daily_wins = 0
         self._daily_losses = 0
-        self._entry_times = {}  # symbol -> datetime for minimum hold check
-        self._hold_minutes = 15  # minimum hold before stop-loss can trigger
+        self._entry_times = {}
+        self._hold_minutes = 15
+        self._daily_trend_cache = {}
         logger.info(f"Options bot started. Account: ${self.starting_value:.2f}")
+
+    def _check_daily_trend(self, symbol):
+        now = datetime.now()
+        cached = self._daily_trend_cache.get(symbol)
+        if cached:
+            passes, ts = cached
+            if (now - ts).total_seconds() < 14400:
+                return passes
+        try:
+            resp = self.stock_data.get_stock_bars(StockBarsRequest(
+                symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
+                start=(date.today() - timedelta(days=45)).isoformat()
+            ))
+            if resp.df.empty:
+                self._daily_trend_cache[symbol] = (False, now)
+                return False
+            df = resp.df
+            if isinstance(df.index, pd.MultiIndex):
+                close = df.xs(symbol, level=1)["close"]
+            else:
+                close = df["close"]
+            if len(close) < 30:
+                self._daily_trend_cache[symbol] = (False, now)
+                return False
+            ema9 = close.ewm(span=9, adjust=False).mean()
+            ema21 = close.ewm(span=21, adjust=False).mean()
+            delta = close.diff()
+            gain = delta.where(delta > 0, 0).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rs = gain / loss.replace(0, np.nan)
+            rsi14 = 100 - (100 / (1 + rs))
+            last5 = pd.DataFrame({
+                "ema9_gt_21": ema9 > ema21,
+                "rsi_ok": (rsi14 >= 50) & (rsi14 <= 75)
+            }).iloc[-5:]
+            passes_bool = (last5["ema9_gt_21"] & last5["rsi_ok"]).sum() >= 3
+            self._daily_trend_cache[symbol] = (passes_bool, now)
+            logger.info(f"Daily trend {symbol}: {'pass' if passes_bool else 'fail'} ({passes_bool} of last 5 bars)")
+            return passes_bool
+        except Exception as e:
+            logger.warning(f"Daily trend check failed for {symbol}: {e}")
+            self._daily_trend_cache[symbol] = (False, now)
+            return False
 
     def _discover_watchlist(self):
         now = datetime.now()
         if self.last_discovery and (now - self.last_discovery).seconds < 3600:
             return self.watchlist
         try:
-            # Start with trending stocks (dynamic discovery) for fresh market signals
             trending = self.discovery.discover_trending_stocks()
             pool = list(dict.fromkeys(t for t in trending if t.upper() not in Config.BLACKLIST))
-            # Fill remainder with core universe for stability (ensures 50-stock coverage)
             for s in UNIVERSE_100:
                 if len(pool) >= OPTIONS_WATCHLIST_SIZE:
                     break
@@ -396,14 +484,6 @@ class OptionsBot:
         try:
             positions = self.alpaca.get_positions()
             opt_positions = [p for p in positions if len(p.symbol) > 10]
-            now_dt = datetime.now()
-            for pos in opt_positions:
-                if pos.symbol not in self._entry_times:
-                    self._entry_times[pos.symbol] = now_dt
-            held = {p.symbol for p in opt_positions}
-            for sym in list(self._entry_times.keys()):
-                if sym not in held:
-                    self._entry_times.pop(sym, None)
             for pos in opt_positions:
                 self._manage(pos)
             total_deployed = sum(float(p.avg_entry_price) * float(p.qty) * 100 for p in opt_positions)
@@ -419,12 +499,13 @@ class OptionsBot:
         try:
             opt_positions, total_deployed = self._manage_positions()
 
+            # Hard position limit: max 2 options positions at any time
+            if len(opt_positions) >= MAX_OPTIONS_POSITIONS:
+                logger.info(f"Position limit reached ({len(opt_positions)}/{MAX_OPTIONS_POSITIONS}) — skipping signal scan")
+                return
+
             acct = self.alpaca.get_account()
             equity = float(acct.equity)
-            # Soft cash reservation: trader bot uses 60% of cash, options bot uses 40%
-            # (= ALLOCATED_PCT). Both bots share one Alpaca cash pool, so we scale the
-            # visible cash down to our allocation. Prevents races where one bot drains
-            # cash earmarked for the other. Counterpart in trader/__main__.py.
             cash = float(acct.cash) * ALLOCATED_PCT
             allocated = equity * ALLOCATED_PCT
             total_cap = allocated * TOTAL_DEPLOYED_PCT
@@ -451,17 +532,19 @@ class OptionsBot:
 
             effective_blacklist = _get_effective_blacklist(equity)
             logger.info(f"Options blacklist: {len(effective_blacklist)} blocked (equity=${equity:.0f}, tier={'full' if equity < 5000 else '5k' if equity < 10000 else '10k' if equity < 25000 else 'none'})")
-            viable = [s for s in self.watchlist if s not in held_symbols and s not in effective_blacklist and _has_viable_option(self.alpaca.trading, self.opt_data, s, per_pos_budget)]
+
+            # Daily trend filter
+            trend_passed = [s for s in self.watchlist if self._check_daily_trend(s)]
+            logger.info(f"Daily trend filter: {len(trend_passed)}/{len(self.watchlist)} passed")
+
+            viable = [s for s in trend_passed if s not in held_symbols and s not in effective_blacklist and _has_viable_option(self.alpaca.trading, self.opt_data, s, per_pos_budget)]
             if not viable:
-                logger.info(f"No symbols with viable options ({len(self.watchlist)} checked, max spread=${MAX_OPTION_SPREAD:.2f}, min OI={MIN_OPTION_OI})")
+                logger.info(f"No symbols with viable options ({len(trend_passed)} trend-passed checked, spread≤${MAX_OPTION_SPREAD:.2f}, OI≥{MIN_OPTION_OI}, IV≥{MIN_IV})")
                 return
-            if len(viable) < len(self.watchlist):
-                logger.info(f"Filtered watchlist: {len(viable)}/{len(self.watchlist)} have viable options (spread≤${MAX_OPTION_SPREAD:.2f}, OI≥{MIN_OPTION_OI})")
+            if len(viable) < len(trend_passed):
+                logger.info(f"Filtered watchlist: {len(viable)}/{len(trend_passed)} have viable options (spread≤${MAX_OPTION_SPREAD:.2f}, OI≥{MIN_OPTION_OI}, IV≥{MIN_IV})")
 
             # TA pre-filter: only send symbols with extreme RSI to the LLM.
-            # RSI < 40 = oversold → potential call buys, RSI > 60 = overbought → potential put buys.
-            # This mirrors the stock bot's technical filter and prevents the LLM from
-            # picking neutral-direction symbols where premium is likely to decay.
             ta_scores = {}
             for s in viable:
                 try:
@@ -560,6 +643,7 @@ class OptionsBot:
                 self.notif.send(f"Closed {pos.symbol} at +{pnl:.0f}% gain", priority="high")
                 self._daily_wins += 1
                 self._entry_times.pop(pos.symbol, None)
+                return
             elif _force_exit_near_expiry(dte):
                 self.alpaca.trading.close_position(pos.symbol)
                 dollar_pnl = (cp - ep) * float(pos.qty) * 100
@@ -567,9 +651,27 @@ class OptionsBot:
                 self.notif.send(f"Force exit {pos.symbol} at {pnl:.0f}% (near expiry EOD)", priority="high")
                 self._daily_losses += 1
                 self._entry_times.pop(pos.symbol, None)
+                return
+            # Rule 1: 14 DTE hard exit for losers
+            if dte <= HARD_EXIT_DTE and pnl < 0:
+                self.alpaca.trading.close_position(pos.symbol)
+                dollar_pnl = (cp - ep) * float(pos.qty) * 100
+                save_trade("options", pos.symbol, "14DTE_EXIT", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
+                self.notif.send(f"14DTE exit {pos.symbol} at {pnl:.0f}% (theta kill zone)", priority="high")
+                self._daily_losses += 1
+                self._entry_times.pop(pos.symbol, None)
+                return
+            # Rule 2: Tight stop at <= 14 DTE for winners
+            if dte <= DTE_TIGHT_STOP_THRESHOLD and pnl > 0 and pnl <= TIGHT_STOP_PCT * 100:
+                self.alpaca.trading.close_position(pos.symbol)
+                dollar_pnl = (cp - ep) * float(pos.qty) * 100
+                save_trade("options", pos.symbol, "TIGHT_STOP", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
+                self.notif.send(f"Tight stop {pos.symbol} at {pnl:.0f}% (≤14 DTE protection)", priority="high")
+                self._daily_losses += 1
+                self._entry_times.pop(pos.symbol, None)
+                return
             elif pnl <= stop:
                 # Minimum hold time: don't stop-loss in the first N minutes.
-                # Prevents bid-ask spread noise from triggering immediate exits.
                 entered = self._entry_times.get(pos.symbol)
                 held_minutes = (datetime.now() - entered).total_seconds() / 60 if entered else 999
                 if held_minutes < self._hold_minutes:
@@ -581,17 +683,15 @@ class OptionsBot:
                 self.notif.send(f"Closed {pos.symbol} at {pnl:.0f}% loss (stop={stop:.0%})", priority="high")
                 self._daily_losses += 1
                 self._entry_times.pop(pos.symbol, None)
-                return  # position is closed — skip min-value floor check below
+                return
 
-            # Minimum value floor: if a contract is worth < $10, close it out.
-            # Prevents holding near-worthless contracts that clutter the portfolio
-            # and drag P&L without any realistic recovery path.
+            # Minimum value floor
             contract_market_value = cp * float(pos.qty) * 100
-            if contract_market_value < 10.0:
+            if contract_market_value < MIN_CONTRACT_VALUE:
                 self.alpaca.trading.close_position(pos.symbol)
                 dollar_pnl = (cp - ep) * float(pos.qty) * 100
                 save_trade("options", pos.symbol, "MIN VALUE FLOOR", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
-                self.notif.send(f"Force exit {pos.symbol} at ${contract_market_value:.0f} (below $10 minimum value floor)", priority="high")
+                self.notif.send(f"Force exit {pos.symbol} at ${contract_market_value:.0f} (below ${MIN_CONTRACT_VALUE} minimum value floor)", priority="high")
                 self._daily_losses += 1
                 self._entry_times.pop(pos.symbol, None)
         except Exception as e:
