@@ -13,7 +13,8 @@ class Config:
     LLM_MODEL = os.getenv("LLM_MODEL", "claude-sonnet-4-20250514")
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-    RISK_MAX_POSITION_PCT = float(os.getenv("RISK_MAX_POSITION_PCT", "0.10"))
+    TRADING_CAPITAL_ALLOCATION = float(os.getenv("TRADING_CAPITAL_ALLOCATION", "0.60"))
+    TARGET_POSITIONS = int(os.getenv("TARGET_POSITIONS", "10"))
     RISK_DAILY_LOSS_LIMIT = float(os.getenv("RISK_DAILY_LOSS_LIMIT", "-5.00"))
     # Stop-loss fraction (negative). Falls back to legacy TA_STOP_LOSS_PCT for
     # backward compatibility with existing .env files; RISK_STOP_LOSS_PCT wins if set.

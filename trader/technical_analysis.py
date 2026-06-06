@@ -153,6 +153,13 @@ class TechnicalAnalysis:
                       components["bb_sell"] + components["trend_sell"] +
                       components["momentum_sell"]) * vol_boost
 
+        # Hard disqualifiers: overbought or illiquid
+        if rsi > 80:
+            buy_score = 0.0
+        curr_vol = vol.get("current", 0) if isinstance(vol, dict) else 0
+        if curr_vol < 1000 or vol_ratio < 0.1:
+            buy_score = 0.0
+
         return {
             "buy_score": float(round(buy_score, 2)),
             "sell_score": float(round(sell_score, 2)),

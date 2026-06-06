@@ -35,13 +35,10 @@ OPTIONS_WATCHLIST_SIZE = 50
 MAX_CONTRACTS_PER_POSITION = 3
 
 MAX_OPTIONS_POSITIONS = 2
-MIN_OPTION_OI = 200
-MAX_OPTION_SPREAD = 0.25
+MIN_OPTION_OI = 100
+MAX_OPTION_SPREAD = 0.50
 MIN_CONTRACT_VALUE = 15
-MIN_IV = 0.35
-MAX_OTM_PCT_7_14 = 3
-MAX_OTM_PCT_14_21 = 5
-MAX_OTM_PCT_21_35 = 8
+MIN_IV = 0.30
 DTE_TIGHT_STOP_THRESHOLD = 14
 TIGHT_STOP_PCT = -0.15
 HARD_EXIT_DTE = 14
@@ -148,10 +145,6 @@ def _contract_is_otm(c, price):
     strike = float(c.strike_price)
     return (c.type == "call" and strike > price) or (c.type == "put" and strike < price)
 
-def _contract_otm_pct(c, price):
-    strike = float(c.strike_price)
-    return (strike / price - 1) * 100 if c.type == "call" else (1 - strike / price) * 100
-
 def _get_snapshot_iv(snap):
     try:
         if isinstance(snap, dict):
@@ -238,7 +231,8 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
                 rejected["wide_spread"] += 1
                 continue
             mid = (bid + ask) / 2
-            if mid <= 0 or mid * 100 > budget:
+            max_contract_cost = budget * 0.8
+            if mid <= 0 or mid * 100 > max_contract_cost:
                 rejected["budget"] += 1
                 continue
             iv = _get_snapshot_iv(snap)
@@ -247,16 +241,6 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
                 rejected["low_iv"] += 1
                 continue
             dte = (c.expiration_date - today_d).days
-            otm_pct = _contract_otm_pct(c, price)
-            if dte <= 14 and abs(otm_pct) > MAX_OTM_PCT_7_14:
-                rejected["otm_violation"] += 1
-                continue
-            elif dte <= 21 and abs(otm_pct) > MAX_OTM_PCT_14_21:
-                rejected["otm_violation"] += 1
-                continue
-            elif dte <= 35 and abs(otm_pct) > MAX_OTM_PCT_21_35:
-                rejected["otm_violation"] += 1
-                continue
             logger.debug(f"{symbol}: Found viable {c.type} ${float(c.strike_price):.0f} @ ${mid:.2f} ({dte} DTE, {oi} OI, IV={iv:.2f})")
             return True
         except:
@@ -325,15 +309,13 @@ def _find_contract(trading_client, data_client, symbol, direction, budget):
             if not bid or not ask: continue
             if ask - bid > MAX_OPTION_SPREAD: continue
             mid = (bid + ask) / 2
-            if mid <= 0 or mid * 100 > budget: continue
+            max_contract_cost = budget * 0.8
+            if mid <= 0 or mid * 100 > max_contract_cost: continue
             iv = _get_snapshot_iv(snap)
             _record_iv_snapshot(symbol, iv)
             if iv < MIN_IV: continue
             dte = (c.expiration_date - today_d).days
             otm_pct = (strike / price - 1) * 100 if direction == "bullish" else (1 - strike / price) * 100
-            if dte <= 14 and abs(otm_pct) > MAX_OTM_PCT_7_14: continue
-            elif dte <= 21 and abs(otm_pct) > MAX_OTM_PCT_14_21: continue
-            elif dte <= 35 and abs(otm_pct) > MAX_OTM_PCT_21_35: continue
             candidates.append((c, mid, dte, otm_pct))
         except:
             pass
@@ -354,10 +336,10 @@ def _get_signal(llm, summary, watchlist):
 - SPY daily change: {summary.get('spy_pct', 'N/A')}%
 
 ENTRY REQUIREMENTS (all must be met):
-- Daily trend: EMA9 > EMA21 for 3 of last 5 days, RSI 50-75
-- IV >= 0.35 (stock must have sufficient volatility)
+- Daily trend: EMA9 > EMA21 for 2 of last 5 days, RSI 50-75
+- IV >= 0.30 (stock must have sufficient volatility)
 - Max 2 options positions total at any time
-- OTM limits: 8% at 21-35 DTE, 5% at 14-21 DTE, 3% at 7-14 DTE
+- Contract cost: at most 80% of per-position budget (${per_pos_budget:.0f})
 
 EXIT DISCIPLINE:
 - Take profit at +50%
@@ -422,7 +404,7 @@ class OptionsBot:
                 return False
             df = resp.df
             if isinstance(df.index, pd.MultiIndex):
-                close = df.xs(symbol, level=1)["close"]
+                close = df.xs(symbol, level=0)["close"]
             else:
                 close = df["close"]
             if len(close) < 30:
@@ -439,7 +421,7 @@ class OptionsBot:
                 "ema9_gt_21": ema9 > ema21,
                 "rsi_ok": (rsi14 >= 50) & (rsi14 <= 75)
             }).iloc[-5:]
-            passes_bool = (last5["ema9_gt_21"] & last5["rsi_ok"]).sum() >= 3
+            passes_bool = (last5["ema9_gt_21"] & last5["rsi_ok"]).sum() >= 2
             self._daily_trend_cache[symbol] = (passes_bool, now)
             logger.info(f"Daily trend {symbol}: {'pass' if passes_bool else 'fail'} ({passes_bool} of last 5 bars)")
             return passes_bool

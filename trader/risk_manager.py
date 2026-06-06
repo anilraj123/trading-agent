@@ -54,7 +54,9 @@ class RiskManager:
                 return False, "Invalid buy quantity"
 
             position_value = quantity * current_price
-            max_position = portfolio_value * Config.RISK_MAX_POSITION_PCT
+            trading_capital = portfolio_value * Config.TRADING_CAPITAL_ALLOCATION
+            per_trade_size = trading_capital / Config.TARGET_POSITIONS
+            max_position = max(50, min(per_trade_size, 2000))
             if position_value > max_position:
                 max_shares = max_position / current_price
                 return False, f"Position too large. Max ${max_position:.0f}, need ${position_value:.2f}. Max shares: {max_shares:.2f}"
@@ -150,7 +152,7 @@ class RiskManager:
 
     def sync_from_alpaca(self, positions: list):
         """Populate risk-manager state from Alpaca positions for symbols not
-        already tracked. Gives stop-loss, expiry, and PDT coverage to positions
+        already tracked. Gives stop-loss and expiry coverage to positions
         opened manually or before bot restart. Bot-registered entries are
         preserved (they have accurate entry timestamps)."""
         now = datetime.now()

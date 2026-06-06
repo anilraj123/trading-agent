@@ -5,12 +5,18 @@ from .config import Config
 logger = logging.getLogger("trader.llm")
 
 
+def _max_position_size(account_value: float) -> float:
+    trading_capital = account_value * Config.TRADING_CAPITAL_ALLOCATION
+    per_trade_size = trading_capital / Config.TARGET_POSITIONS
+    return max(50, min(per_trade_size, 2000))
+
+
 def _build_system_prompt(account_value: float = None) -> str:
     if account_value is None:
         account_value = Config.SIMULATED_ACCOUNT_SIZE
     stop_pct = abs(Config.TA_STOP_LOSS_PCT) * 100
     daily_loss_amt = abs(Config.RISK_DAILY_LOSS_LIMIT / 100 * account_value)
-    max_pos = account_value * Config.RISK_MAX_POSITION_PCT
+    max_pos = _max_position_size(account_value)
 
     return f"""You are an expert AI stock trading assistant. You analyze market data using TECHNICAL ANALYSIS and make precise trading decisions.
 
@@ -35,7 +41,7 @@ SELL SIGNALS (Score >= {Config.TA_MIN_SELL_SCORE}):
 - Negative momentum over last 5 bars (+{Config.TA_MOM_WEIGHT} points)
 
 RISK RULES:
-- ${account_value:.0f} account. Max {Config.RISK_MAX_POSITION_PCT:.0%} (${max_pos:.0f}) per trade.
+- ${account_value:.0f} account. Max ${max_pos:.0f} per trade ({100 / Config.TARGET_POSITIONS:.0f}% per position across {Config.TARGET_POSITIONS} target positions).
 - Stop loss at {stop_pct:.0f}% from entry.
 - Max {Config.RISK_MAX_TRADES_PER_DAY} trades per day.
 - Daily loss limit: {abs(Config.RISK_DAILY_LOSS_LIMIT):.1f}% of account (${daily_loss_amt:.2f}).
@@ -94,7 +100,8 @@ class LLMEngine:
 
     def get_trading_decision(self, portfolio_data: dict, account_value: float = None) -> tuple:
         system_prompt = _build_system_prompt(account_value)
-        user_prompt = self._build_prompt(portfolio_data, account_value)
+        max_pos = _max_position_size(account_value or Config.SIMULATED_ACCOUNT_SIZE)
+        user_prompt = self._build_prompt(portfolio_data, account_value, max_pos)
         combined_prompt = f"SYSTEM:\n{system_prompt}\n\nUSER:\n{user_prompt}"
 
         raw_response = self.call(
@@ -120,7 +127,7 @@ class LLMEngine:
                 "error": str(e)
             }, combined_prompt, raw_response
 
-    def _build_prompt(self, portfolio: dict, account_value: float = None) -> str:
+    def _build_prompt(self, portfolio: dict, account_value: float = None, max_pos: float = None) -> str:
         ta_data = portfolio.get("technical_analysis", {})
         ta_formatted = {}
         for symbol, data in ta_data.items():
@@ -161,6 +168,8 @@ class LLMEngine:
             news_block = json.dumps(news_context, indent=2)
 
         stock_positions = [p for p in portfolio.get('positions', []) if len(p.get('symbol', '')) <= 10]
+        if max_pos is None:
+            max_pos = _max_position_size(account_value or Config.SIMULATED_ACCOUNT_SIZE)
 
         return f"""Portfolio:
 - Total Value: ${portfolio['total_value']:.2f} | Cash: ${portfolio['cash']:.2f}
@@ -182,9 +191,12 @@ SPY RSI(14): {portfolio.get("spy_rsi_14", "N/A")}
 
 DECISION RULES:
 1. BUY when buy_score >= {Config.TA_MIN_BUY_SCORE} (momentum confirmation signals)
-2. SELL when sell_score >= {Config.TA_MIN_SELL_SCORE} (momentum fading or overextended)
+2. SELL: do not recommend SELL on a position unless EITHER:
+   a. sell_score >= {Config.TA_MIN_SELL_SCORE:.1f} (deterministic signal), OR
+   b. unrealized P&L <= -2.5% (approaching stop), OR
+   c. DTE-based rule applies (options only)
 3. Use stop loss at {Config.TA_STOP_LOSS_PCT:.0%} from entry price
-4. Position size max ${account_value * Config.RISK_MAX_POSITION_PCT:.0f} ({Config.RISK_MAX_POSITION_PCT:.0%} of account)
+4. Position size max ${max_pos:.0f} per trade (target {Config.TARGET_POSITIONS} concurrent positions)
 5. All indicators are on 5-minute bars — MACD(8/21/5) captures ~105-min trends, momentum(5) ~25 min
 6. Only trade stocks with clear momentum signals (no mean-reversion plays)
 7. Evaluate each top candidate — consider news catalysts alongside TA signals
