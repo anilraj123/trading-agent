@@ -9,7 +9,7 @@ from .config import Config
 
 logger = logging.getLogger("trader.email")
 
-REPORTS_DIR = "/app/data/llm_reports"
+REPORTS_DIR = f"{os.getenv('DATA_DIR', '/app/data')}/llm_reports"
 
 
 def _send_via_smtp(smtp_host, smtp_port, user, password, from_addr, to_addr, subject, body):

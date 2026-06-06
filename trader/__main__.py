@@ -72,7 +72,7 @@ class TradingBot:
 
     def _load_or_init_seed(self) -> float:
         """Return the immutable initial seed. Writes it once on first run."""
-        seed_file = "/app/data/initial_seed.txt"
+        seed_file = f"{os.getenv('DATA_DIR', '/app/data')}/initial_seed.txt"
         if os.path.exists(seed_file):
             try:
                 with open(seed_file) as f:
@@ -92,7 +92,7 @@ class TradingBot:
     def _load_deposits_csv(self):
         """Load known deposits from deposits.csv."""
         deposits = []
-        deposits_file = "/app/data/deposits.csv"
+        deposits_file = f"{os.getenv('DATA_DIR', '/app/data')}/deposits.csv"
         if not os.path.exists(deposits_file):
             logger.warning("deposits.csv not found, assuming no prior deposits")
             return deposits

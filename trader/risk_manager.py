@@ -6,7 +6,7 @@ from .config import Config
 
 logger = logging.getLogger("trader.risk")
 
-STATE_FILE = "/app/data/risk_state.json"
+STATE_FILE = f"{os.getenv('DATA_DIR', '/app/data')}/risk_state.json"
 
 class RiskManager:
     def __init__(self):
