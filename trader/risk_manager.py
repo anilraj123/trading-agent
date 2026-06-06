@@ -1,8 +1,12 @@
+import json
 import logging
+import os
 from datetime import datetime, date
 from .config import Config
 
 logger = logging.getLogger("trader.risk")
+
+STATE_FILE = "/app/data/risk_state.json"
 
 class RiskManager:
     def __init__(self):
@@ -13,6 +17,49 @@ class RiskManager:
         self.last_reset_date = date.today()
         self.positions = {}
         self.position_entry_dates: dict[str, datetime] = {}
+        self._load_state()
+
+    def _state_path(self):
+        return STATE_FILE
+
+    def _save_state(self):
+        path = self._state_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            state = {
+                "daily_trades": self.daily_trades,
+                "daily_pnl": self.daily_pnl,
+                "total_realized_pnl": self.total_realized_pnl,
+                "trade_log": self.trade_log,
+                "last_reset_date": self.last_reset_date.isoformat(),
+                "position_entry_dates": {
+                    sym: dt.isoformat() for sym, dt in self.position_entry_dates.items()
+                },
+            }
+            with open(path, "w") as f:
+                json.dump(state, f)
+        except Exception as e:
+            logger.warning(f"Failed to save risk state: {e}")
+
+    def _load_state(self):
+        path = self._state_path()
+        try:
+            with open(path) as f:
+                state = json.load(f)
+            self.daily_trades = state.get("daily_trades", 0)
+            self.daily_pnl = state.get("daily_pnl", 0.0)
+            self.total_realized_pnl = state.get("total_realized_pnl", 0.0)
+            self.trade_log = state.get("trade_log", [])
+            reset_s = state.get("last_reset_date")
+            if reset_s:
+                self.last_reset_date = date.fromisoformat(reset_s)
+            ped = state.get("position_entry_dates", {})
+            self.position_entry_dates = {
+                sym: datetime.fromisoformat(dt) for sym, dt in ped.items()
+            }
+            logger.info(f"Loaded risk state: {self.daily_trades} trades, ${self.daily_pnl:.2f} P&L, {len(self.position_entry_dates)} entry dates")
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
+            pass
 
     def reset_if_new_day(self):
         if date.today() != self.last_reset_date:
@@ -21,16 +68,18 @@ class RiskManager:
             self.daily_pnl = 0.0
             self.trade_log = []
             self.last_reset_date = date.today()
+            self._save_state()
 
-    def can_trade(self, portfolio_value: float) -> tuple[bool, str]:
+    def can_trade(self, portfolio_value: float, unrealized_pnl: float = 0.0) -> tuple[bool, str]:
         self.reset_if_new_day()
 
         if self.daily_trades >= Config.RISK_MAX_TRADES_PER_DAY:
             return False, f"Daily trade limit reached ({self.daily_trades}/{Config.RISK_MAX_TRADES_PER_DAY})"
 
+        total_daily_pnl = self.daily_pnl + unrealized_pnl
         daily_loss_limit = Config.RISK_DAILY_LOSS_LIMIT / 100 * portfolio_value
-        if self.daily_pnl <= daily_loss_limit:
-            return False, f"Daily loss limit hit (${self.daily_pnl:.2f} / ${daily_loss_limit:.2f})"
+        if total_daily_pnl <= daily_loss_limit:
+            return False, f"Daily loss limit hit (${total_daily_pnl:.2f} = realized ${self.daily_pnl:.2f} + unrealized ${unrealized_pnl:.2f}, limit ${daily_loss_limit:.2f})"
 
         return True, "OK"
 
@@ -83,11 +132,13 @@ class RiskManager:
             "date": datetime.now()
         }
         logger.info(f"Stop loss set for {symbol}: ${stop_loss:.2f} ({Config.TA_STOP_LOSS_PCT:.0%} from ${entry_price:.2f})")
+        self._save_state()
 
     def unregister_position(self, symbol: str):
         """Call AFTER a sell/close order is successfully submitted."""
         self.positions.pop(symbol, None)
         self.position_entry_dates.pop(symbol, None)
+        self._save_state()
 
     def check_stop_losses(self, current_positions: list) -> list:
         stop_loss_triggers = []
@@ -133,6 +184,7 @@ class RiskManager:
         elif "SELL" in action:
             self.position_entry_dates.pop(symbol, None)
         logger.info(f"Trade recorded: {action} {quantity} {symbol} @ ${price:.2f} | PnL: {pnl:+.2f}% (${pnl_dollars:+.2f})")
+        self._save_state()
 
     def get_expired_positions(self, current_positions: list, max_days: int = None) -> list[str]:
         if max_days is None:
@@ -171,7 +223,9 @@ class RiskManager:
                         "quantity": qty,
                         "date": now
                     }
-                    self.position_entry_dates[symbol] = now
+                    # Don't overwrite persisted entry dates on restart
+                    if symbol not in self.position_entry_dates:
+                        self.position_entry_dates[symbol] = now
                     logger.info(f"Synced {symbol} from Alpaca: entry=${entry_price:.2f} stop=${stop_loss:.2f}")
                 except (ValueError, AttributeError) as e:
                     logger.debug(f"Could not sync {symbol}: {e}")
@@ -180,6 +234,7 @@ class RiskManager:
             if symbol not in alpaca_symbols:
                 self.positions.pop(symbol, None)
                 self.position_entry_dates.pop(symbol, None)
+        self._save_state()
 
     def get_status(self, portfolio_value: float = None) -> dict:
         pv = portfolio_value if portfolio_value else Config.SIMULATED_ACCOUNT_SIZE
