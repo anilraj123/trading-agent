@@ -346,13 +346,16 @@ class TradingBot:
         stock_deploy_pct = (stock_mv / max_stock_deploy * 100) if max_stock_deploy > 0 else 0
 
         technical_analysis = {}
-        for symbol in self.watchlist[:100]:
-            try:
-                bars = self.alpaca.get_bars(symbol)
-                if bars is not None and len(bars) > 50:
-                    technical_analysis[symbol] = self.ta.compute_all(bars)
-            except Exception as e:
-                logger.debug(f"TA failed for {symbol}: {e}")
+        bars_df = self.alpaca.get_bars_batch(self.watchlist[:100])
+        if bars_df is not None:
+            for symbol in self.watchlist[:100]:
+                try:
+                    if symbol in bars_df.index.get_level_values('symbol'):
+                        symbol_bars = bars_df.xs(symbol, level=0)
+                        if len(symbol_bars) > 50:
+                            technical_analysis[symbol] = self.ta.compute_all(symbol_bars)
+                except Exception as e:
+                    logger.debug("TA failed for %s: %s", symbol, e)
 
         # Rank by momentum buy_score — shrink watchlist to 30 best candidates
         scored = [(s, d.get("score", {}).get("buy_score", 0)) for s, d in technical_analysis.items() if d]
@@ -384,11 +387,11 @@ class TradingBot:
         # Fetch Alpaca news headlines for top 5 candidates
         news_context = {}
         if top_candidates:
+            from alpaca.data.historical.news import NewsClient
+            from alpaca.data.requests import NewsRequest
+            nc = NewsClient(Config.ALPACA_API_KEY, Config.ALPACA_SECRET_KEY)
             for sym in top_candidates:
                 try:
-                    from alpaca.data.historical.news import NewsClient
-                    from alpaca.data.requests import NewsRequest
-                    nc = NewsClient(Config.ALPACA_API_KEY, Config.ALPACA_SECRET_KEY)
                     req = NewsRequest(symbols=sym, limit=2, exclude_contentless=True)
                     articles = nc.get_news(req)
                     headlines = []
@@ -398,16 +401,23 @@ class TradingBot:
                                 headlines.append(article.headline)
                     news_context[sym] = headlines
                 except Exception as e:
-                    logger.debug(f"News fetch failed for {sym}: {e}")
+                    logger.debug("News fetch failed for %s: %s", sym, e)
                     news_context[sym] = []
 
+        now = datetime.now()
         spy_rsi_14 = None
-        try:
-            spy_bars = self.alpaca.get_bars("SPY")
-            if spy_bars is not None and len(spy_bars) > 20:
-                spy_rsi_14 = TechnicalAnalysis.rsi(spy_bars["close"], 14)
-        except Exception as e:
-            logger.debug(f"SPY RSI failed: {e}")
+        if hasattr(self, '_spy_rsi_cache'):
+            cached_rsi, cached_ts = self._spy_rsi_cache
+            if (now - cached_ts).total_seconds() < 900:
+                spy_rsi_14 = cached_rsi
+        if spy_rsi_14 is None:
+            try:
+                spy_bars = self.alpaca.get_bars("SPY")
+                if spy_bars is not None and len(spy_bars) > 20:
+                    spy_rsi_14 = TechnicalAnalysis.rsi(spy_bars["close"], 14)
+                    self._spy_rsi_cache = (spy_rsi_14, now)
+            except Exception as e:
+                logger.debug("SPY RSI failed: %s", e)
 
         return {
             "total_value": total_value,

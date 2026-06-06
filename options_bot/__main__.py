@@ -16,7 +16,7 @@ from alpaca.data.timeframe import TimeFrame
 
 from trader.config import Config
 from trader.alpaca_client import AlpacaClient
-from trader.llm_engine import LLMEngine
+from trader.llm_engine import LLMEngine, OPTIONS_SIGNAL_TOOL
 from trader.notifications import NotificationManager as BaseNotif
 from trader.stock_discovery import StockDiscovery, UNIVERSE_100
 from trader.technical_analysis import TechnicalAnalysis
@@ -93,7 +93,8 @@ def _underlying_price(symbol):
         ))
         if not bars.df.empty:
             return float(bars.df["close"].iloc[-1])
-    except: pass
+    except Exception:
+        logger.debug("_underlying_price failed for %s", symbol)
     return None
 
 
@@ -102,8 +103,9 @@ def _option_dte(symbol):
         date_str = symbol[-15:-9]
         exp = datetime.strptime(date_str, "%y%m%d").date()
         return (exp - date.today()).days
-    except:
-        return None
+    except Exception:
+        logger.debug("_option_dte failed for %s", symbol)
+    return None
 
 def _get_dynamic_stop(dte):
     if dte is None:
@@ -135,8 +137,8 @@ def _batch_quote_options(data_client, contract_symbols):
             resp = data_client.get_option_snapshot(req)
             if isinstance(resp, dict):
                 quotes.update(resp)
-        except:
-            pass
+        except Exception as e:
+            logger.debug("Batch quote failed for batch starting at %d: %s", i, e)
     return quotes
 
 def _contract_is_otm(c, price):
@@ -148,8 +150,9 @@ def _get_snapshot_iv(snap):
         if isinstance(snap, dict):
             return float(snap.get("implied_volatility") or 0)
         return float(getattr(snap, "implied_volatility", 0) or 0)
-    except:
-        return 0.0
+    except Exception:
+        logger.debug("_get_snapshot_iv failed")
+    return 0.0
 
 def _record_iv_snapshot(symbol, iv):
     path = "/app/data/iv_history.csv"
@@ -195,8 +198,8 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
                     rejected["low_oi"] += 1
                     continue
                 otm_contracts.append(c)
-        except:
-            pass
+        except Exception as e:
+            logger.debug("Contract fetch failed for %s DTE range %d-%d: %s", symbol, start_dte, end_dte, e)
 
     if not otm_contracts:
         return False
@@ -234,15 +237,15 @@ def _has_viable_option(trading_client, data_client, symbol, budget):
                 rejected["budget"] += 1
                 continue
             iv = _get_snapshot_iv(snap)
-            _record_iv_snapshot(symbol, iv)
             if iv < MIN_IV:
                 rejected["low_iv"] += 1
                 continue
+            _record_iv_snapshot(symbol, iv)
             dte = (c.expiration_date - today_d).days
             logger.debug(f"{symbol}: Found viable {c.type} ${float(c.strike_price):.0f} @ ${mid:.2f} ({dte} DTE, {oi} OI, IV={iv:.2f})")
             return True
-        except:
-            pass
+        except Exception as e:
+            logger.debug("Viable option check failed for %s contract %s: %s", symbol, c.symbol if hasattr(c, 'symbol') else '?', e)
 
     return False
 
@@ -263,8 +266,8 @@ def _find_contract(trading_client, data_client, symbol, direction, budget):
             resp = trading_client.get_option_contracts(req)
             if hasattr(resp, "option_contracts"):
                 all_contracts.extend(resp.option_contracts)
-        except:
-            pass
+        except Exception as e:
+            logger.debug("Find contract fetch failed for %s DTE %d-%d: %s", symbol, start_dte, end_dte, e)
     if not all_contracts: return None
 
     candidates = []
@@ -278,8 +281,8 @@ def _find_contract(trading_client, data_client, symbol, direction, budget):
             open_interest = int(getattr(c, "open_interest", 0) or 0)
             if open_interest < MIN_OPTION_OI: continue
             eligible.append(c)
-        except:
-            pass
+        except Exception as e:
+            logger.debug("Find contract filter failed for %s: %s", symbol, e)
 
     if not eligible:
         return None
@@ -310,17 +313,17 @@ def _find_contract(trading_client, data_client, symbol, direction, budget):
             max_contract_cost = budget * 0.8
             if mid <= 0 or mid * 100 > max_contract_cost: continue
             iv = _get_snapshot_iv(snap)
-            _record_iv_snapshot(symbol, iv)
             if iv < MIN_IV: continue
             dte = (c.expiration_date - today_d).days
             otm_pct = (strike / price - 1) * 100 if direction == "bullish" else (1 - strike / price) * 100
-            candidates.append((c, mid, dte, otm_pct))
-        except:
-            pass
+            candidates.append((c, mid, dte, otm_pct, iv))
+        except Exception as e:
+            logger.debug("Find contract quote check failed for %s: %s", symbol, e)
 
     if not candidates: return None
     candidates.sort(key=lambda x: (abs(x[3]), -x[2]))
-    return candidates[0]
+    _record_iv_snapshot(symbol, candidates[0][4])
+    return candidates[0][:4]
 
 
 def _get_signal(llm, summary, watchlist):
@@ -344,16 +347,10 @@ EXIT DISCIPLINE:
 - Dynamic stop: close at -25% loss (≤5 DTE), -40% (6–14 DTE), -55% (>14 DTE)
 - Never hold a losing position past 14 DTE
 
-Pick ONE symbol and direction from the watchlist (or hold).
-Respond JSON only:
-{{"symbol": "SPY", "direction": "bullish|bearish|hold", "reasoning": "reason"}}"""
+Pick ONE symbol and direction from the watchlist (or hold)."""
     try:
-        content = llm.call(messages=[{"role": "user", "content": prompt}], max_tokens=200)
-        start = content.find("{")
-        end = content.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            content = content[start:end+1]
-        return json.loads(content)
+        result = llm.call_structured(OPTIONS_SIGNAL_TOOL, messages=[{"role": "user", "content": prompt}], max_tokens=200)
+        return result
     except Exception as e:
         logger.error(f"Signal failed: {e}")
         return {"symbol": None, "direction": "hold", "error": str(e)}
@@ -525,14 +522,16 @@ class OptionsBot:
 
             # TA pre-filter: only send symbols with extreme RSI to the LLM.
             ta_scores = {}
-            for s in viable:
-                try:
-                    bars = self.alpaca.get_bars(s, days=7)
-                    if bars is not None and len(bars) > 50:
-                        ta = TechnicalAnalysis.compute_all(bars)
-                        ta_scores[s] = ta
-                except:
-                    pass
+            bars_df = self.alpaca.get_bars_batch(viable, days=7)
+            if bars_df is not None:
+                for s in viable:
+                    try:
+                        if s in bars_df.index.get_level_values('symbol'):
+                            symbol_bars = bars_df.xs(s, level=0)
+                            if len(symbol_bars) > 50:
+                                ta_scores[s] = TechnicalAnalysis.compute_all(symbol_bars)
+                    except Exception as e:
+                        logger.debug("TA compute failed for %s: %s", s, e)
 
             viable_for_llm = [s for s in viable if s in ta_scores and (
                 ta_scores[s]["rsi_14"] < 40 or ta_scores[s]["rsi_14"] > 60

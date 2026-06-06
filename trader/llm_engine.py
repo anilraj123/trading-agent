@@ -4,6 +4,48 @@ from .config import Config
 
 logger = logging.getLogger("trader.llm")
 
+TRADING_DECISION_TOOL = {
+    "name": "trading_decision",
+    "description": "Trading decisions with market outlook",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "decisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"},
+                        "action": {"type": "string", "enum": ["BUY", "SELL", "HOLD"]},
+                        "quantity": {"type": "number"},
+                        "confidence": {"type": "number"},
+                        "strategy": {"type": "string", "enum": ["momentum", "risk_management"]},
+                        "reasoning": {"type": "string"}
+                    },
+                    "required": ["symbol", "action", "quantity", "confidence", "strategy", "reasoning"]
+                }
+            },
+            "market_outlook": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+            "summary": {"type": "string"}
+        },
+        "required": ["decisions", "market_outlook", "summary"]
+    }
+}
+
+OPTIONS_SIGNAL_TOOL = {
+    "name": "options_signal",
+    "description": "Options trading signal — pick one symbol or hold",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "direction": {"type": "string", "enum": ["bullish", "bearish", "hold"]},
+            "reasoning": {"type": "string"}
+        },
+        "required": ["symbol", "direction", "reasoning"]
+    }
+}
+
 
 def _max_position_size(account_value: float) -> float:
     trading_capital = account_value * Config.TRADING_CAPITAL_ALLOCATION
@@ -47,22 +89,6 @@ RISK RULES:
 - Daily loss limit: {abs(Config.RISK_DAILY_LOSS_LIMIT):.1f}% of account (${daily_loss_amt:.2f}).
 - If uncertain, HOLD.
 
-OUTPUT FORMAT (JSON only, no extra text):
-{{
-  "decisions": [
-    {{
-      "symbol": "AAPL",
-      "action": "BUY|SELL|HOLD",
-      "quantity": 0.5,
-      "confidence": 0.85,
-      "strategy": "momentum|risk_management",
-      "reasoning": "RSI at 22 (oversold) + positive MACD crossover suggests bounce"
-    }}
-  ],
-  "market_outlook": "bullish|bearish|neutral",
-  "summary": "Overall assessment in 1 sentence"
-}}
-
 Quantity: fractional shares allowed. Only include stocks with clear technical signals.
 """
 
@@ -98,34 +124,62 @@ class LLMEngine:
             )
             return response.choices[0].message.content.strip()
 
+    def call_structured(self, tool_def, system=None, messages=None, model=None, max_tokens=1500, temperature=0.1):
+        model = model or Config.LLM_MODEL
+        if Config.LLM_PROVIDER == "anthropic":
+            kwargs = dict(
+                model=model, max_tokens=max_tokens, temperature=temperature,
+                tools=[tool_def], tool_choice={"type": "tool", "name": tool_def["name"]}
+            )
+            if system:
+                kwargs["system"] = system
+            kwargs["messages"] = messages or []
+            response = self.client.messages.create(**kwargs)
+            for block in response.content:
+                if block.type == "tool_use":
+                    return block.input
+            logger.error("No tool_use block in Anthropic response")
+            return {"error": "No tool_use block in response"}
+        else:
+            msgs = []
+            if system:
+                msgs.append({"role": "system", "content": system + "\n\nRespond in JSON only."})
+            msgs.extend(messages or [])
+            response = self.client.chat.completions.create(
+                model=model, messages=msgs, temperature=temperature, max_tokens=max_tokens
+            )
+            raw = response.choices[0].message.content.strip()
+            try:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    raw = raw[start:end+1]
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                logger.error("Failed to parse OpenAI response: %s", raw[:200])
+                return {"error": f"JSON parse failed: {raw[:100]}"}
+
     def get_trading_decision(self, portfolio_data: dict, account_value: float = None) -> tuple:
         system_prompt = _build_system_prompt(account_value)
         max_pos = _max_position_size(account_value or Config.SIMULATED_ACCOUNT_SIZE)
         user_prompt = self._build_prompt(portfolio_data, account_value, max_pos)
         combined_prompt = f"SYSTEM:\n{system_prompt}\n\nUSER:\n{user_prompt}"
 
-        raw_response = self.call(
+        decision = self.call_structured(
+            TRADING_DECISION_TOOL,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}]
         )
 
-        try:
-            parsed = raw_response
-            start = parsed.find("{")
-            end = parsed.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                parsed = parsed[start:end+1]
-            decision = json.loads(parsed)
-            logger.info(f"LLM decision: {decision.get('market_outlook')} - {decision.get('summary')}")
-            return decision, combined_prompt, raw_response
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response: {raw_response[:200]}")
+        if decision.get("error"):
+            logger.error("LLM decision error: %s", decision["error"])
             return {
-                "decisions": [],
-                "market_outlook": "neutral",
-                "summary": "Error parsing AI response",
-                "error": str(e)
-            }, combined_prompt, raw_response
+                "decisions": [], "market_outlook": "neutral",
+                "summary": "Error parsing AI response", "error": decision["error"]
+            }, combined_prompt, str(decision)
+
+        logger.info("LLM decision: %s - %s", decision.get("market_outlook"), decision.get("summary"))
+        return decision, combined_prompt, json.dumps(decision)
 
     def _build_prompt(self, portfolio: dict, account_value: float = None, max_pos: float = None) -> str:
         ta_data = portfolio.get("technical_analysis", {})
