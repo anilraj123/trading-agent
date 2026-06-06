@@ -42,7 +42,7 @@ class Config:
     TA_MOM_THRESHOLD = float(os.getenv("TA_MOM_THRESHOLD", "2.0"))
     TA_VOL_THRESHOLD = float(os.getenv("TA_VOL_THRESHOLD", "1.2"))
     TA_VOL_BOOST = float(os.getenv("TA_VOL_BOOST", "1.2"))
-    TA_MIN_BUY_SCORE = float(os.getenv("TA_MIN_BUY_SCORE", "0.5"))
+    TA_MIN_BUY_SCORE = float(os.getenv("TA_MIN_BUY_SCORE", "3.0"))
     TA_MIN_SELL_SCORE = float(os.getenv("TA_MIN_SELL_SCORE", "1.0"))
     # TA_STOP_LOSS_PCT is now an alias of RISK_STOP_LOSS_PCT. Kept for code that
     # historically read Config.TA_STOP_LOSS_PCT (LLM prompt, panels, etc.). Always

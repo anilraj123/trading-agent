@@ -349,7 +349,7 @@ EXIT DISCIPLINE:
 
 Pick ONE symbol and direction from the watchlist (or hold)."""
     try:
-        result = llm.call_structured(OPTIONS_SIGNAL_TOOL, messages=[{"role": "user", "content": prompt}], max_tokens=200)
+        result = llm.call_structured(OPTIONS_SIGNAL_TOOL, messages=[{"role": "user", "content": [{"type": "text", "text": prompt, "cache_control": {"type": "ephemeral"}}]}], max_tokens=200)
         return result
     except Exception as e:
         logger.error(f"Signal failed: {e}")
@@ -490,12 +490,20 @@ class OptionsBot:
                 logger.info(f"Total premium cap reached (${total_deployed:.0f}/${total_cap:.0f})")
                 return
 
-            spy_price = _underlying_price("SPY")
             spy_pct = None
-            if spy_price:
-                bars = self.alpaca.get_bars("SPY", days=2)
-                if bars is not None and len(bars) > 1:
-                    spy_pct = round((spy_price / float(bars['close'].iloc[0]) - 1) * 100, 2)
+            try:
+                spy_bars = self.stock_data.get_stock_bars(StockBarsRequest(
+                    symbol_or_symbols="SPY", timeframe=TimeFrame.Day,
+                    start=(date.today() - timedelta(days=10)).isoformat()
+                ))
+                if not spy_bars.df.empty:
+                    closes = spy_bars.df["close"]
+                    if isinstance(closes.index, pd.MultiIndex):
+                        closes = closes.xs("SPY", level=0)
+                    if len(closes) >= 2:
+                        spy_pct = round((float(closes.iloc[-1]) / float(closes.iloc[-2]) - 1) * 100, 2)
+            except Exception as e:
+                logger.debug("SPY daily change failed: %s", e)
 
             per_pos_budget = allocated * PER_POSITION_PCT
 

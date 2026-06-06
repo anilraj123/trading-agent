@@ -5,7 +5,7 @@ Autonomous stock trading bot powered by LLM, supervised via risk guardrails.
 ## Architecture
 
 ```
-[LLM (OpenRouter)] → analyzes market data → outputs BUY/SELL/HOLD decisions
+[LLM (Anthropic)] → analyzes market data → outputs BUY/SELL/HOLD decisions
        ↓
 [Risk Manager] → validates against rules → approves/rejects
        ↓
@@ -21,10 +21,10 @@ Autonomous stock trading bot powered by LLM, supervised via risk guardrails.
 - **Start with paper trading** (default in this bot)
 
 ### 2. Get LLM API Key
-- Go to [openrouter.ai](https://openrouter.ai)
-- Sign up, add $5-10 credit
+- Go to [anthropic.com](https://console.anthropic.com)
+- Sign up, add credits
 - Create API key
-- Recommended model: `anthropic/claude-3.5-haiku` (cheap, good for trading)
+- Model: `claude-sonnet-4-20250514` (good balance of cost and quality)
 
 ### 3. Install & Configure
 
@@ -70,9 +70,9 @@ ALPACA_BASE_URL=https://paper-api.alpaca.markets
 # ALPACA_BASE_URL=https://api.alpaca.markets
 
 # LLM
-LLM_PROVIDER=openrouter
-LLM_API_KEY=your_key
-LLM_MODEL=anthropic/claude-3.5-haiku
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+LLM_MODEL=claude-sonnet-4-20250514
 
 # Risk settings
 RISK_MAX_POSITION_PCT=0.10

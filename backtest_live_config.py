@@ -72,7 +72,7 @@ def compute_ta_at(df_up_to_date):
 
     price_change_pct = ((close.iloc[-1] / close.iloc[-2] - 1) * 100) if len(close) > 1 else 0.0
     vol_data = TechnicalAnalysis.volume_analysis(volume, price_change_pct)
-    mom_10 = TechnicalAnalysis.momentum(close, 10)
+    mom_5 = TechnicalAnalysis.momentum(close, 5)
 
     ta_dict = {
         "current_price": round(close.iloc[-1], 2),
@@ -84,7 +84,7 @@ def compute_ta_at(df_up_to_date):
         "bollinger_bands": bb,
         "atr_14": atr,
         "volume": vol_data,
-        "momentum_10": mom_10
+        "momentum_5": mom_5
     }
 
     ta_dict["score"] = TechnicalAnalysis.score_signals(ta_dict)
