@@ -1,6 +1,8 @@
 import csv
 import os
 import glob
+import json
+import hashlib
 from datetime import date, datetime, timedelta
 
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
@@ -8,6 +10,9 @@ HISTORY_FILE = f"{DATA_DIR}/daily_history.csv"
 TRADE_FILE = f"{DATA_DIR}/trade_log.csv"
 LLM_REPORTS_DIR = f"{DATA_DIR}/llm_reports"
 DISCOVERY_FILE = f"{DATA_DIR}/stock_discovery.csv"
+CYCLE_LOG_FILE = f"{DATA_DIR}/cycle_log.jsonl"
+LLM_CALLS_FILE = f"{DATA_DIR}/llm_calls.jsonl"
+SYSTEM_PROMPTS_DIR = f"{DATA_DIR}/llm_system_prompts"
 
 def _ensure_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -42,6 +47,49 @@ def save_discovery_snapshot(watchlist_size, universe_size, gainers, losers, acti
         if not file_exists:
             writer.writerow(COLUMNS_DISCOVERY)
         writer.writerow([datetime.now().isoformat(), watchlist_size, universe_size, gainers, losers, active])
+
+
+def _append_jsonl(path: str, record: dict):
+    """Append one timestamped JSON record. Best-effort: logging must never
+    break the trading loop, so all failures are swallowed by the callers."""
+    _ensure_dir()
+    record = {"ts": datetime.now().isoformat(), **record}
+    with open(path, "a") as f:
+        f.write(json.dumps(record, default=str) + "\n")
+
+
+def log_cycle(record: dict):
+    """One structured record per bot cycle (the monitoring heartbeat).
+    `record` should include at least {"bot": ...}. Never raises."""
+    try:
+        _append_jsonl(CYCLE_LOG_FILE, record)
+    except Exception:
+        pass
+
+
+def log_llm_call(bot: str, model: str, system_prompt: str, user_prompt: str,
+                 raw_response: str, usage: dict = None, parse_ok: bool = True):
+    """Capture the actual LLM call. The (large, mostly-static) system prompt is
+    stored once per unique hash under llm_system_prompts/ so each line stays
+    lean while remaining fully reconstructable. Never raises."""
+    try:
+        sha = hashlib.sha1((system_prompt or "").encode()).hexdigest()[:12]
+        os.makedirs(SYSTEM_PROMPTS_DIR, exist_ok=True)
+        sp_path = os.path.join(SYSTEM_PROMPTS_DIR, f"{sha}.txt")
+        if system_prompt and not os.path.exists(sp_path):
+            with open(sp_path, "w") as f:
+                f.write(system_prompt)
+        _append_jsonl(LLM_CALLS_FILE, {
+            "bot": bot,
+            "model": model,
+            "system_sha": sha,
+            "user_prompt": user_prompt,
+            "raw_response": raw_response,
+            "usage": usage or {},
+            "parse_ok": parse_ok,
+        })
+    except Exception:
+        pass
 
 def _read_trades_since(day):
     if not os.path.isfile(TRADE_FILE):

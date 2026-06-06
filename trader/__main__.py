@@ -215,13 +215,56 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"Executing decisions failed (LLM report still sent): {e}")
                 actions_taken = []
+            sys_prompt = llm_prompt.split("USER:\n", 1)[0].replace("SYSTEM:\n", "")
+            usr_prompt = llm_prompt.split("USER:\n", 1)[1] if "USER:\n" in llm_prompt else llm_prompt
             self.email_notifier.send_llm_report(
-                system_prompt=llm_prompt.split("USER:\n", 1)[0].replace("SYSTEM:\n", ""),
-                user_prompt=llm_prompt.split("USER:\n", 1)[1] if "USER:\n" in llm_prompt else llm_prompt,
+                system_prompt=sys_prompt,
+                user_prompt=usr_prompt,
                 raw_response=llm_response,
                 decisions=decisions,
                 actions_taken=actions_taken
             )
+
+            # Structured monitoring logs (best-effort; never blocks trading).
+            try:
+                from .tracker import log_cycle, log_llm_call
+                log_llm_call(
+                    "trading", getattr(self.llm, "last_model", None),
+                    sys_prompt, usr_prompt, llm_response,
+                    usage=getattr(self.llm, "last_usage", {}),
+                    parse_ok="error" not in decisions,
+                )
+                ta = portfolio.get("technical_analysis", {})
+                log_cycle({
+                    "bot": "trading",
+                    "cycle": self.cycle_count,
+                    "equity": portfolio.get("total_value"),
+                    "cash": portfolio.get("cash"),
+                    "stock_mv": portfolio.get("stock_deployment_current"),
+                    "stock_deploy_pct": portfolio.get("stock_deployment_pct"),
+                    "num_positions": len([p for p in portfolio.get("positions", []) if len(p.get("symbol", "")) <= 10]),
+                    "daily_pnl": portfolio.get("daily_pl"),
+                    "trades_today": self.risk.daily_trades,
+                    "regime_mode": portfolio.get("spy_regime_mode"),
+                    "spy_rsi": portfolio.get("spy_rsi_14"),
+                    "watchlist_size": len(self.watchlist),
+                    "ta_computed": len(ta),
+                    "top_candidates": [
+                        {
+                            "sym": s,
+                            "buy_score": ta.get(s, {}).get("score", {}).get("buy_score"),
+                            "sell_score": ta.get(s, {}).get("score", {}).get("sell_score"),
+                            "rsi": ta.get(s, {}).get("rsi_14"),
+                        }
+                        for s in portfolio.get("top_candidates", [])
+                    ],
+                    "decisions": decisions.get("decisions", []),
+                    "actions": actions_taken,
+                    "market_outlook": decisions.get("market_outlook"),
+                    "summary": decisions.get("summary"),
+                })
+            except Exception as e:
+                logger.debug(f"cycle logging failed: {e}")
 
             self._print_status(portfolio)
 

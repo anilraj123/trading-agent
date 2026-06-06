@@ -96,6 +96,10 @@ Quantity: fractional shares allowed. Only include stocks with clear technical si
 
 class LLMEngine:
     def __init__(self):
+        # Last-call telemetry for monitoring (token usage / model), set by every
+        # call()/call_structured(). Read by the bots when persisting llm_calls.jsonl.
+        self.last_usage = {}
+        self.last_model = None
         if Config.LLM_PROVIDER == "anthropic":
             from anthropic import Anthropic
             self.client = Anthropic(api_key=Config.ANTHROPIC_API_KEY)
@@ -106,6 +110,29 @@ class LLMEngine:
                 api_key=Config.LLM_API_KEY
             )
 
+    def _record_usage(self, response, model):
+        """Stash token usage from the last API response. Best-effort — token
+        accounting must never interfere with a trade decision."""
+        self.last_model = model
+        try:
+            u = getattr(response, "usage", None)
+            if u is None:
+                self.last_usage = {}
+            elif Config.LLM_PROVIDER == "anthropic":
+                self.last_usage = {
+                    "input_tokens": getattr(u, "input_tokens", None),
+                    "output_tokens": getattr(u, "output_tokens", None),
+                    "cache_read_input_tokens": getattr(u, "cache_read_input_tokens", None),
+                    "cache_creation_input_tokens": getattr(u, "cache_creation_input_tokens", None),
+                }
+            else:
+                self.last_usage = {
+                    "input_tokens": getattr(u, "prompt_tokens", None),
+                    "output_tokens": getattr(u, "completion_tokens", None),
+                }
+        except Exception:
+            self.last_usage = {}
+
     def call(self, system=None, messages=None, model=None, max_tokens=1500, temperature=0.1):
         model = model or Config.LLM_MODEL
         if Config.LLM_PROVIDER == "anthropic":
@@ -114,6 +141,7 @@ class LLMEngine:
                 kwargs["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
             kwargs["messages"] = messages or []
             response = self.client.messages.create(**kwargs)
+            self._record_usage(response, model)
             return response.content[0].text
         else:
             msgs = []
@@ -123,6 +151,7 @@ class LLMEngine:
             response = self.client.chat.completions.create(
                 model=model, messages=msgs, temperature=temperature, max_tokens=max_tokens
             )
+            self._record_usage(response, model)
             return response.choices[0].message.content.strip()
 
     def call_structured(self, tool_def, system=None, messages=None, model=None, max_tokens=1500, temperature=0.1):
@@ -136,6 +165,7 @@ class LLMEngine:
                 kwargs["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
             kwargs["messages"] = messages or []
             response = self.client.messages.create(**kwargs)
+            self._record_usage(response, model)
             for block in response.content:
                 if block.type == "tool_use":
                     return block.input
@@ -149,6 +179,7 @@ class LLMEngine:
             response = self.client.chat.completions.create(
                 model=model, messages=msgs, temperature=temperature, max_tokens=max_tokens
             )
+            self._record_usage(response, model)
             raw = response.choices[0].message.content.strip()
             try:
                 start = raw.find("{")

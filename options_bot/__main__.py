@@ -350,6 +350,13 @@ EXIT DISCIPLINE:
 Pick ONE symbol and direction from the watchlist (or hold)."""
     try:
         result = llm.call_structured(OPTIONS_SIGNAL_TOOL, messages=[{"role": "user", "content": [{"type": "text", "text": prompt, "cache_control": {"type": "ephemeral"}}]}], max_tokens=200)
+        try:
+            from trader.tracker import log_llm_call
+            log_llm_call("options", getattr(llm, "last_model", None), "", prompt,
+                         json.dumps(result), usage=getattr(llm, "last_usage", {}),
+                         parse_ok=not result.get("error"))
+        except Exception:
+            pass
         return result
     except Exception as e:
         logger.error(f"Signal failed: {e}")
@@ -475,9 +482,23 @@ class OptionsBot:
         try:
             opt_positions, total_deployed = self._manage_positions()
 
+            # Progressive funnel record — logged at whichever stage the cycle exits,
+            # so we can see *why* no trade happened (best-effort, never blocks).
+            cyc = {"bot": "options", "cycle": self.cycle_count,
+                   "num_positions": len(opt_positions),
+                   "total_deployed": round(total_deployed, 2)}
+
+            def _emit(stage):
+                try:
+                    from trader.tracker import log_cycle
+                    log_cycle({**cyc, "stage": stage})
+                except Exception:
+                    pass
+
             # Hard position limit: max 2 options positions at any time
             if len(opt_positions) >= MAX_OPTIONS_POSITIONS:
                 logger.info(f"Position limit reached ({len(opt_positions)}/{MAX_OPTIONS_POSITIONS}) — skipping signal scan")
+                _emit("position_limit")
                 return
 
             acct = self.alpaca.get_account()
@@ -485,9 +506,12 @@ class OptionsBot:
             cash = float(acct.cash) * ALLOCATED_PCT
             allocated = equity * ALLOCATED_PCT
             total_cap = allocated * TOTAL_DEPLOYED_PCT
+            cyc.update({"equity": round(equity, 2), "cash": round(cash, 2),
+                        "total_cap": round(total_cap, 2)})
 
             if total_deployed >= total_cap:
                 logger.info(f"Total premium cap reached (${total_deployed:.0f}/${total_cap:.0f})")
+                _emit("total_cap")
                 return
 
             spy_pct = None
@@ -520,10 +544,14 @@ class OptionsBot:
             # Daily trend filter
             trend_passed = [s for s in self.watchlist if self._check_daily_trend(s)]
             logger.info(f"Daily trend filter: {len(trend_passed)}/{len(self.watchlist)} passed")
+            cyc.update({"spy_pct": spy_pct, "watchlist": len(self.watchlist),
+                        "trend_passed": len(trend_passed)})
 
             viable = [s for s in trend_passed if s not in held_symbols and s not in effective_blacklist and _has_viable_option(self.alpaca.trading, self.opt_data, s, per_pos_budget)]
+            cyc["viable"] = len(viable)
             if not viable:
                 logger.info(f"No symbols with viable options ({len(trend_passed)} trend-passed checked, spread≤${MAX_OPTION_SPREAD:.2f}, OI≥{MIN_OPTION_OI}, IV≥{MIN_IV})")
+                _emit("no_viable")
                 return
             if len(viable) < len(trend_passed):
                 logger.info(f"Filtered watchlist: {len(viable)}/{len(trend_passed)} have viable options (spread≤${MAX_OPTION_SPREAD:.2f}, OI≥{MIN_OPTION_OI}, IV≥{MIN_IV})")
@@ -548,20 +576,25 @@ class OptionsBot:
             failed_ta = len(viable) - passed_ta
             if failed_ta > 0:
                 logger.info(f"TA pre-filter: {passed_ta}/{len(viable)} pass RSI extreme threshold (kept: {viable_for_llm})")
+            cyc["viable_for_llm"] = viable_for_llm
             if not viable_for_llm:
                 logger.info("No symbols pass TA pre-filter (all RSI in neutral 40-60 range)")
+                _emit("no_ta")
                 return
 
             summary = {"equity": equity, "cash": cash, "open_options": len(opt_positions), "spy_pct": spy_pct}
             signal = _get_signal(self.llm, summary, viable_for_llm)
+            cyc["signal"] = signal
             if signal.get("error"):
                 self.notif.send(f"Options signal error: {signal['error']}", priority="high")
             if signal.get("direction") == "hold":
                 logger.info(f"Hold: {signal.get('reasoning', '')}")
+                _emit("hold")
                 return
 
             budget = min(per_pos_budget, total_cap - total_deployed, cash)
             self._open(signal["symbol"], signal["direction"], budget, signal.get("reasoning", ""))
+            _emit("trade")
 
             if self.cycle_count % self.status_interval == 0:
                 self.notif.send(
