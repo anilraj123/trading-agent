@@ -5,6 +5,7 @@ import csv
 import os
 from datetime import datetime, timedelta
 from alpaca.trading.enums import OrderSide
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
@@ -48,6 +49,10 @@ class TradingBot:
         self.status_interval = 4
         self.start_date = datetime.now()
         self.last_summary_date = None
+        self._daily_bars_cache = None
+        self._daily_bars_date = None
+        self._daily_spy_bars = None
+        self._daily_spy_date = None
         # initial_seed is the immutable "principal at first-ever bot startup". It is
         # persisted on disk so that restarts AFTER a deposit don't snapshot the new
         # (deposit-inflated) equity as the baseline. Without this, deposits would be
@@ -260,12 +265,9 @@ class TradingBot:
             else:
                 apy = 0
 
-            spy_bars = self.alpaca.get_bars('SPY')
+            spy_bars = self.alpaca.get_bars('SPY', days=250, timeframe=TimeFrame(1, TimeFrameUnit.Day))
             spy_apy = 0
             spy_return_pct = 0
-            # Default spy_value to starting equity (i.e., "SPY flat") so the f-string below
-            # can't NameError if the SPY bars fetch fails. The outer except would otherwise
-            # swallow the error and silently drop the entire daily summary.
             spy_value = self.starting_account_value
             if spy_bars is not None and len(spy_bars) > 1:
                 spy_start = spy_bars['close'].iloc[0]
@@ -346,13 +348,28 @@ class TradingBot:
         stock_deploy_pct = (stock_mv / max_stock_deploy * 100) if max_stock_deploy > 0 else 0
 
         technical_analysis = {}
-        bars_df = self.alpaca.get_bars_batch(self.watchlist[:100])
+        today = datetime.now().date()
+        if self._daily_bars_date != today:
+            bars_df = self.alpaca.get_bars_batch(self.watchlist[:100], days=250,
+                                                  timeframe=TimeFrame(1, TimeFrameUnit.Day))
+            self._daily_bars_cache = bars_df
+            self._daily_bars_date = today
+        else:
+            bars_df = self._daily_bars_cache
+
         if bars_df is not None:
+            # Drop the forming (today's) bar — only compute TA on completed daily bars.
+            # Guard: only drop if the last timestamp is actually today (pre-open/pre-fetch
+            # safety — if the cache fetched before today's bar formed, the last completed
+            # bar is yesterday's and should be kept).
+            timestamps = bars_df.index.get_level_values('timestamp').unique()
+            if len(timestamps) > 1 and timestamps[-1].date() == today:
+                bars_df = bars_df[bars_df.index.get_level_values('timestamp').isin(timestamps[:-1])]
             for symbol in self.watchlist[:100]:
                 try:
                     if symbol in bars_df.index.get_level_values('symbol'):
                         symbol_bars = bars_df.xs(symbol, level=0)
-                        if len(symbol_bars) > 50:
+                        if len(symbol_bars) > 60:
                             technical_analysis[symbol] = self.ta.compute_all(symbol_bars)
                 except Exception as e:
                     logger.debug("TA failed for %s: %s", symbol, e)
@@ -406,18 +423,23 @@ class TradingBot:
 
         now = datetime.now()
         spy_rsi_14 = None
-        if hasattr(self, '_spy_rsi_cache'):
-            cached_rsi, cached_ts = self._spy_rsi_cache
-            if (now - cached_ts).total_seconds() < 900:
-                spy_rsi_14 = cached_rsi
-        if spy_rsi_14 is None:
+        spy_today = now.date()
+        if self._daily_spy_date != spy_today:
             try:
-                spy_bars = self.alpaca.get_bars("SPY")
-                if spy_bars is not None and len(spy_bars) > 20:
-                    spy_rsi_14 = TechnicalAnalysis.rsi(spy_bars["close"], 14)
-                    self._spy_rsi_cache = (spy_rsi_14, now)
+                spy_bars_raw = self.alpaca.get_bars("SPY", days=250, timeframe=TimeFrame(1, TimeFrameUnit.Day))
+                if spy_bars_raw is not None and len(spy_bars_raw) > 60:
+                    # Drop forming bar — use only completed daily bars
+                    timestamps = spy_bars_raw.index.get_level_values('timestamp').unique()
+                    if len(timestamps) > 1 and timestamps[-1].date() == spy_today:
+                        spy_bars_raw = spy_bars_raw[spy_bars_raw.index.get_level_values('timestamp').isin(timestamps[:-1])]
+                    spy_rsi_14 = TechnicalAnalysis.rsi(spy_bars_raw["close"], 14)
+                    self._daily_spy_bars = spy_bars_raw
+                    self._daily_spy_date = spy_today
             except Exception as e:
                 logger.debug("SPY RSI failed: %s", e)
+        else:
+            if self._daily_spy_bars is not None and len(self._daily_spy_bars) > 60:
+                spy_rsi_14 = TechnicalAnalysis.rsi(self._daily_spy_bars["close"], 14)
 
         return {
             "total_value": total_value,

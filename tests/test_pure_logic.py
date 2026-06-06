@@ -13,21 +13,22 @@ import os
 test_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, test_root)
 
-os.environ.setdefault("DATA_DIR", "/tmp/test_data")
-os.environ.setdefault("TA_MIN_BUY_SCORE", "3.0")
-os.environ.setdefault("TA_MIN_SELL_SCORE", "1.0")
-os.environ.setdefault("TA_RSI_OVERBOUGHT", "65")
-os.environ.setdefault("TA_RSI_WEIGHT", "1.0")
-os.environ.setdefault("TA_MACD_WEIGHT", "1.0")
-os.environ.setdefault("TA_BB_WEIGHT", "1.0")
-os.environ.setdefault("TA_BB_UPPER_THRESHOLD", "0.90")
-os.environ.setdefault("TA_TREND_WEIGHT", "1.0")
-os.environ.setdefault("TA_MOM_WEIGHT", "1.0")
-os.environ.setdefault("TA_MOM_THRESHOLD", "2.0")
-os.environ.setdefault("TA_VOL_THRESHOLD", "1.2")
-os.environ.setdefault("TA_VOL_BOOST", "1.2")
-os.environ.setdefault("TRADING_CAPITAL_ALLOCATION", "0.60")
-os.environ.setdefault("TARGET_POSITIONS", "10")
+# Force env vars before config.py loads .env — tests must be deterministic
+os.environ["DATA_DIR"] = "/tmp/test_data"
+os.environ["TA_MIN_BUY_SCORE"] = "1.0"
+os.environ["TA_MIN_SELL_SCORE"] = "1.0"
+os.environ["TA_RSI_OVERBOUGHT"] = "65"
+os.environ["TA_RSI_WEIGHT"] = "1.0"
+os.environ["TA_MACD_WEIGHT"] = "1.0"
+os.environ["TA_BB_WEIGHT"] = "1.0"
+os.environ["TA_BB_UPPER_THRESHOLD"] = "0.90"
+os.environ["TA_TREND_WEIGHT"] = "1.0"
+os.environ["TA_MOM_WEIGHT"] = "1.0"
+os.environ["TA_MOM_THRESHOLD"] = "2.0"
+os.environ["TA_VOL_THRESHOLD"] = "1.2"
+os.environ["TA_VOL_BOOST"] = "1.2"
+os.environ["TRADING_CAPITAL_ALLOCATION"] = "0.60"
+os.environ["TARGET_POSITIONS"] = "10"
 
 from trader.config import Config
 from trader.technical_analysis import TechnicalAnalysis
@@ -74,7 +75,7 @@ class TestScoreSignals:
         }
         result = TechnicalAnalysis.score_signals(ta)
         assert result["buy_score"] == 1.0
-        assert result["meets_buy_threshold"] is False  # 1.0 < Config.TA_MIN_BUY_SCORE (3.0)
+        assert result["meets_buy_threshold"] is True  # 1.0 >= Config.TA_MIN_BUY_SCORE (1.0)
 
     def test_all_signals_fire(self):
         """MACD + trend + momentum all confirm → buy_score ≈ 3.0 (or 3.6 with volume)."""

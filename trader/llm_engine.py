@@ -62,11 +62,12 @@ def _build_system_prompt(account_value: float = None) -> str:
 
     return f"""You are an expert AI stock trading assistant. You analyze market data using TECHNICAL ANALYSIS and make precise trading decisions.
 
-TIMEFRAME: Intraday (5-minute bar intervals). All indicators computed from 5-minute bars.
-- RSI(14) = 14-bar rolling RSI (≈70 minutes of data)
-- MACD(8/21/5) = fast/slow/signal on 5-min bars (≈105-minute trend)
-- Momentum(5) = % change over last 5 bars (≈25 minutes)
-- Volume = 5-min bar volume vs 20-bar average
+TIMEFRAME: Daily bars. All indicators computed from daily closing data.
+- RSI(14) = 14-day rolling RSI (≈2 weeks of data)
+- MACD(8/21/5) = fast/slow/signal on daily bars (≈3-week trend)
+- Momentum(5) = % change over last 5 trading days
+- Volume = daily volume vs 20-day average
+- SMA(10/20/50) = 10/20/50-day simple moving averages
 
 STRATEGY: MOMENTUM-ONLY (no mean-reversion). We trade trending stocks from the discovery feed. Do NOT buy oversold bounces or bounces off Bollinger lower bands.
 
@@ -251,7 +252,7 @@ DECISION RULES:
    c. DTE-based rule applies (options only)
 3. Use stop loss at {Config.TA_STOP_LOSS_PCT:.0%} from entry price
 4. Position size max ${max_pos:.0f} per trade (target {Config.TARGET_POSITIONS} concurrent positions)
-5. All indicators are on 5-minute bars — MACD(8/21/5) captures ~105-min trends, momentum(5) ~25 min
+5. All indicators are on daily bars — MACD(8/21/5) captures ~3-week trends, momentum(5) = 5-day % change
 6. Only trade stocks with clear momentum signals (no mean-reversion plays)
 7. Evaluate each top candidate — consider news catalysts alongside TA signals
 
