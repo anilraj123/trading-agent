@@ -110,7 +110,7 @@ class LLMEngine:
         if Config.LLM_PROVIDER == "anthropic":
             kwargs = dict(model=model, max_tokens=max_tokens, temperature=temperature)
             if system:
-                kwargs["system"] = system
+                kwargs["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
             kwargs["messages"] = messages or []
             response = self.client.messages.create(**kwargs)
             return response.content[0].text
@@ -132,7 +132,7 @@ class LLMEngine:
                 tools=[tool_def], tool_choice={"type": "tool", "name": tool_def["name"]}
             )
             if system:
-                kwargs["system"] = system
+                kwargs["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
             kwargs["messages"] = messages or []
             response = self.client.messages.create(**kwargs)
             for block in response.content:
