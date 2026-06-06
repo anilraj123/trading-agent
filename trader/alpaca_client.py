@@ -92,6 +92,18 @@ class AlpacaClient:
         bars = self.data.get_stock_bars(req)
         return bars.df if len(bars.df) > 0 else None
 
+    def get_bars_batch(self, symbols: list, days: int = 14):
+        if not symbols:
+            return None
+        start = datetime.now() - timedelta(days=days)
+        req = StockBarsRequest(
+            symbol_or_symbols=symbols,
+            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            start=start
+        )
+        bars = self.data.get_stock_bars(req)
+        return bars.df if len(bars.df) > 0 else None
+
     def get_latest_price(self, symbol: str):
         req = StockLatestBarRequest(symbol_or_symbols=symbol)
         bar = self.data.get_stock_latest_bar(req)
