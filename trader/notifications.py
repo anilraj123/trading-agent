@@ -129,9 +129,14 @@ class NotificationManager:
         msg = f"DAILY LOSS LIMIT HIT\nP&L: ${pnl:.2f} / Limit: ${limit:.2f}\nTrading stopped for today."
         self.send(msg, priority="high")
 
-    def notify_bot_startup(self, strategy_info: str = None):
+    def notify_bot_startup(self, strategy_info: str = None, account_value: float = None):
         from .config import Config
         stop_pct = abs(Config.TA_STOP_LOSS_PCT) * 100
+        if account_value is None:
+            account_value = Config.SIMULATED_ACCOUNT_SIZE
+        trading_capital = account_value * Config.TRADING_CAPITAL_ALLOCATION
+        per_trade_size = trading_capital / Config.TARGET_POSITIONS
+        max_pos = max(50, min(per_trade_size, 2000))
 
         if not strategy_info:
             strategy_info = f"Active (RSI {Config.TA_RSI_OVERSOLD}/{Config.TA_RSI_OVERBOUGHT})"
@@ -140,7 +145,7 @@ class NotificationManager:
                f"Time: {_local_now().strftime('%I:%M %p %Z')}\n"
                f"Strategy: {strategy_info}\n"
                f"Watchlist: 100 stocks (dynamic)\n"
-               f"Stop Loss: {stop_pct:.0f}% | Max Position: {Config.RISK_MAX_POSITION_PCT:.0%}\n"
+               f"Stop Loss: {stop_pct:.0f}% | Max Position: ${max_pos:.0f}\n"
                f"Status: Ready for market open")
         self.send(msg)
 

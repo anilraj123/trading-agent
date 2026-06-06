@@ -141,10 +141,10 @@ class TradingBot:
                 self.notif.send(f"Stock universe refreshed: {len(new_stocks)} stocks loaded")
                 save_discovery_snapshot(
                     len(new_stocks),
-                    len(self.discovery.discovered_stocks) if hasattr(self.discovery, 'discovered_stocks') else 0,
-                    len(self.discovery.last_gainers) if hasattr(self.discovery, 'last_gainers') and self.discovery.last_gainers else 0,
-                    len(self.discovery.last_losers) if hasattr(self.discovery, 'last_losers') and self.discovery.last_losers else 0,
-                    len(self.discovery.last_active) if hasattr(self.discovery, 'last_active') and self.discovery.last_active else 0,
+                    len(self.discovery.discovered_stocks),
+                    len(self.discovery.last_gainers),
+                    len(self.discovery.last_losers),
+                    len(self.discovery.last_active),
                 )
 
             portfolio = self._gather_portfolio_data()
@@ -356,8 +356,23 @@ class TradingBot:
         # Rank by momentum buy_score — shrink watchlist to 30 best candidates
         scored = [(s, d.get("score", {}).get("buy_score", 0)) for s, d in technical_analysis.items() if d]
         scored.sort(key=lambda x: -x[1])
+
+        # Filter out hard-disqualified stocks: illiquid (volume<1000 or ratio<0.1)
+        # or overbought (RSI>80).  These reached the LLM as ghost candidates
+        # (THR with 132 vol, XLU at RSI 94) via the fallback at line 365-366.
+        disqualified = set()
+        for s, _ in scored:
+            d = technical_analysis.get(s, {})
+            vol = d.get("volume", {})
+            rsi = d.get("rsi_14", 50)
+            curr_vol = vol.get("current", 0) if isinstance(vol, dict) else 0
+            vol_ratio = vol.get("ratio", 1.0) if isinstance(vol, dict) else 1.0
+            if curr_vol < 1000 or vol_ratio < 0.1 or rsi > 80:
+                disqualified.add(s)
+        scored = [(s, bs) for s, bs in scored if s not in disqualified]
+
         self.watchlist = [s for s, _ in scored[:30]]
-        logger.info(f"Ranked watchlist: {len(self.watchlist)} momentum names (top by buy_score)")
+        logger.info(f"Ranked watchlist: {len(self.watchlist)} momentum names (top by buy_score, {len(disqualified)} disqualified)")
 
         # Identify top 5 candidates that meet the buy threshold for LLM focus
         buy_threshold = Config.TA_MIN_BUY_SCORE
@@ -489,8 +504,9 @@ class TradingBot:
                 # Anchor the soft cap to trading_capital (same anchor RiskManager.validate_order uses).
                 # Previously this used self.account_value, which is the un-allocated base — that made
                 # the soft cap looser than the validator's, so it was effectively dead. Keeping them
-                # in sync means a change to RISK_MAX_POSITION_PCT scales both gates consistently.
-                max_position_value = self.trading_capital * Config.RISK_MAX_POSITION_PCT
+                # in sync means a change to TARGET_POSITIONS scales both gates consistently.
+                per_trade_size = self.trading_capital / Config.TARGET_POSITIONS
+                max_position_value = max(50, min(per_trade_size, 2000))
                 cost = quantity * price
 
                 if cost > available_cash:
@@ -531,15 +547,8 @@ class TradingBot:
                 decision["quantity"] = quantity
                 logger.info(f"SPY reduced regime: halved {symbol} qty to {quantity} (buy_score={sym_buy_score:.2f})")
 
-            # PDT guard: block same-day sells. Positions opened today cannot be
-            # sold until the next trading day. Prevents day-trading flag risk and
-            # stops the bot from opening positions with no exit path.
-            if action == "SELL":
-                entry_dt = self.risk.position_entry_dates.get(symbol)
-                if entry_dt and entry_dt.date() == datetime.now().date():
-                    logger.info(f"Rejecting SELL {symbol}: bought today ({entry_dt.strftime('%H:%M')}), PDT lock until next session")
-                    action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "PDT lock: bought today"})
-                    continue
+            # Same-day sells are now permitted. FINRA replaced the PDT framework
+            # with an intraday margin system on June 4, 2026.
 
             # Pass the trader's reserved cash slice (not raw account cash) so the
             # validator's "not enough cash" check matches the soft reservation above.
@@ -618,7 +627,7 @@ class TradingBot:
             f"[bold green]AI Trading Agent Started[/]\n"
             f"Discovery: Dynamic (100-stock universe + live trending)\n"
             f"Strategy: {strategy_label}\n"
-            f"Stop Loss: {stop_label} | Max Position: {Config.RISK_MAX_POSITION_PCT:.0%}\n"
+            f"Stop Loss: {stop_label} | Max Position: ${max(50, min(self.starting_account_value * Config.TRADING_CAPITAL_ALLOCATION / Config.TARGET_POSITIONS, 2000)):.0f}\n"
             f"Interval: {Config.TRADING_INTERVAL_MINUTES}min | Max trades/day: {Config.RISK_MAX_TRADES_PER_DAY}\n"
             f"Account: ${self.starting_account_value:.0f}",
             title="Bot Config",
@@ -626,7 +635,7 @@ class TradingBot:
         ))
 
         strategy_info = f"Active (RSI {Config.TA_RSI_OVERSOLD}/{Config.TA_RSI_OVERBOUGHT})"
-        self.notif.notify_bot_startup(strategy_info)
+        self.notif.notify_bot_startup(strategy_info, account_value=self.starting_account_value)
 
         self.running = True
         schedule.every(Config.TRADING_INTERVAL_MINUTES).minutes.do(self.run_cycle)
