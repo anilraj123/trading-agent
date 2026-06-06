@@ -39,9 +39,7 @@ MIN_OPTION_OI = 100
 MAX_OPTION_SPREAD = 0.50
 MIN_CONTRACT_VALUE = 15
 MIN_IV = 0.30
-DTE_TIGHT_STOP_THRESHOLD = 14
-TIGHT_STOP_PCT = -0.15
-HARD_EXIT_DTE = 14
+
 
 # Symbols excluded from options trading (hard block, not sent to LLM)
 OPTIONS_BLACKLIST = [s.strip().upper() for s in os.getenv("OPTIONS_BLACKLIST", "").split(",") if s.strip()]
@@ -343,8 +341,7 @@ ENTRY REQUIREMENTS (all must be met):
 
 EXIT DISCIPLINE:
 - Take profit at +50%
-- If DTE <= 14 and position is losing: exit immediately, theta will destroy value
-- If DTE <= 14 and position is profitable: protect with -15% tight stop
+- Dynamic stop: close at -25% loss (≤5 DTE), -40% (6–14 DTE), -55% (>14 DTE)
 - Never hold a losing position past 14 DTE
 
 Pick ONE symbol and direction from the watchlist (or hold).
@@ -634,25 +631,7 @@ class OptionsBot:
                 self._daily_losses += 1
                 self._entry_times.pop(pos.symbol, None)
                 return
-            # Rule 1: 14 DTE hard exit for losers
-            if dte <= HARD_EXIT_DTE and pnl < 0:
-                self.alpaca.trading.close_position(pos.symbol)
-                dollar_pnl = (cp - ep) * float(pos.qty) * 100
-                save_trade("options", pos.symbol, "14DTE_EXIT", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
-                self.notif.send(f"14DTE exit {pos.symbol} at {pnl:.0f}% (theta kill zone)", priority="high")
-                self._daily_losses += 1
-                self._entry_times.pop(pos.symbol, None)
-                return
-            # Rule 2: Tight stop at <= 14 DTE for winners
-            if dte <= DTE_TIGHT_STOP_THRESHOLD and pnl <= TIGHT_STOP_PCT * 100:
-                self.alpaca.trading.close_position(pos.symbol)
-                dollar_pnl = (cp - ep) * float(pos.qty) * 100
-                save_trade("options", pos.symbol, "TIGHT_STOP", float(pos.qty), entry_price=ep, exit_price=cp, pnl_pct=pnl, pnl_dollars=dollar_pnl)
-                self.notif.send(f"Tight stop {pos.symbol} at {pnl:.0f}% (≤14 DTE protection)", priority="high")
-                self._daily_losses += 1
-                self._entry_times.pop(pos.symbol, None)
-                return
-            elif pnl <= stop:
+            if pnl <= stop:
                 # Minimum hold time: don't stop-loss in the first N minutes.
                 entered = self._entry_times.get(pos.symbol)
                 held_minutes = (datetime.now() - entered).total_seconds() / 60 if entered else 999

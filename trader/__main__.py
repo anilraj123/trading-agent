@@ -152,10 +152,11 @@ class TradingBot:
             stock_positions = [p for p in positions if len(p.symbol) <= 10]
             self.risk.sync_from_alpaca(stock_positions)
 
-            can_trade, reason = self.risk.can_trade(self.trading_capital)
+            stock_unrealized = sum(float(p.unrealized_pl) for p in positions if len(p.symbol) <= 10)
+            can_trade, reason = self.risk.can_trade(self.trading_capital, unrealized_pnl=stock_unrealized)
             if not can_trade:
                 logger.warning(f"Trading paused: {reason}")
-                self.notif.notify_daily_loss_limit(self.risk.daily_pnl, Config.RISK_DAILY_LOSS_LIMIT / 100 * self.trading_capital)
+                self.notif.notify_daily_loss_limit(self.risk.daily_pnl + stock_unrealized, Config.RISK_DAILY_LOSS_LIMIT / 100 * self.trading_capital)
                 return
 
             stop_loss_orders = self.risk.check_stop_losses(positions)
@@ -571,13 +572,19 @@ class TradingBot:
                     # Submit FIRST. Only register the position with the risk manager
                     # after Alpaca accepts the order — otherwise a failed submit leaves
                     # a phantom entry that the software-stop loop will react to.
-                    self.alpaca.submit_market_order(symbol, OrderSide.BUY, quantity, stop_loss=order_stop)
-                    self.risk.register_position(symbol, price, quantity)
-                    self.risk.record_trade(symbol, "BUY", quantity, price, strategy=strategy)
-                    self.notif.notify_trade("BUY", symbol, quantity, price)
-                    save_trade("trading", symbol, "BUY", quantity, entry_price=price, strategy=strategy, reason=decision.get("reasoning"))
-                    stock_mv += quantity * price  # track for subsequent buys in this cycle
-                    logger.info(f"BUY {quantity} {symbol} @ ${price:.2f} [{strategy}] stop=${stop_loss_price:.2f}{' [bracket]' if use_bracket else ' [software stop]'}")
+                    order = self.alpaca.submit_market_order(symbol, OrderSide.BUY, quantity, stop_loss=order_stop)
+                    # Read actual fill price from order response. Market orders fill
+                    # nearly instantly, but fall back to the pre-trade quote if still
+                    # pending (filled_avg_price is None).
+                    fill_price = float(getattr(order, "filled_avg_price", 0) or 0)
+                    if fill_price <= 0:
+                        fill_price = price
+                    self.risk.register_position(symbol, fill_price, quantity)
+                    self.risk.record_trade(symbol, "BUY", quantity, fill_price, strategy=strategy)
+                    self.notif.notify_trade("BUY", symbol, quantity, fill_price)
+                    save_trade("trading", symbol, "BUY", quantity, entry_price=fill_price, strategy=strategy, reason=decision.get("reasoning"))
+                    stock_mv += quantity * fill_price  # track for subsequent buys in this cycle
+                    logger.info(f"BUY {quantity} {symbol} @ ${fill_price:.2f} [{strategy}] stop=${stop_loss_price:.2f}{' [bracket]' if use_bracket else ' [software stop]'}")
                     action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "executed", "reason": f"stop={stop_loss_price:.2f} bracket={use_bracket}"})
 
                 elif action == "SELL" and quantity > 0:
