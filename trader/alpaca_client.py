@@ -82,23 +82,27 @@ class AlpacaClient:
         logger.info(f"Position closed: {symbol}")
         return order
 
-    def get_bars(self, symbol: str, days: int = 14):
+    def get_bars(self, symbol: str, days: int = 14, timeframe: TimeFrame = None):
+        if timeframe is None:
+            timeframe = TimeFrame(5, TimeFrameUnit.Minute)
         start = datetime.now() - timedelta(days=days)
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
-            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            timeframe=timeframe,
             start=start
         )
         bars = self.data.get_stock_bars(req)
         return bars.df if len(bars.df) > 0 else None
 
-    def get_bars_batch(self, symbols: list, days: int = 14):
+    def get_bars_batch(self, symbols: list, days: int = 14, timeframe: TimeFrame = None):
         if not symbols:
             return None
+        if timeframe is None:
+            timeframe = TimeFrame(5, TimeFrameUnit.Minute)
         start = datetime.now() - timedelta(days=days)
         req = StockBarsRequest(
             symbol_or_symbols=symbols,
-            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            timeframe=timeframe,
             start=start
         )
         bars = self.data.get_stock_bars(req)

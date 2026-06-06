@@ -21,8 +21,10 @@
 | `MIN_NOTIONAL` | **$10** | Minimum order notional value |
 | `status_interval` | **4** cycles | Heartbeat notification every N cycles |
 | `unexpected_change > 5.0` | **$5** | Deposit detection threshold (ignore smaller equity fluctuations) |
-| `bars lookback days` | **7** | Days of minute-bar data fetched per symbol for TA |
-| `min bars required` | **> 50** | Minimum bars needed to compute TA on a symbol |
+| `bars lookback days` | **250** | Days of daily bar data fetched per symbol for TA |
+| `min bars required` | **> 60** | Minimum bars needed to compute TA on a symbol |
+| `bar timeframe (equity)` | **Daily (1D)** | Timeframe for TA computation; cached once per trading day |
+| `bar timeframe (options)` | **5-min** | Options bot uses a separate intraday fetch for RSI pre-filter |
 
 ### Technical Analysis (`trader/config.py` + `trader/technical_analysis.py`)
 
@@ -45,15 +47,15 @@
 | `TA_STOP_LOSS_PCT` | alias | Deprecated env-var; if set, used as fallback for `RISK_STOP_LOSS_PCT`. Code now reads `RISK_STOP_LOSS_PCT` everywhere. |
 
 | Indicator | Periods | Lookback |
-|---|---|---|
-| RSI | **14** | 14 minute-bars (~14 min) |
-| MACD | **8 / 21 / 5** | fast / slow / signal on minute-bars (~21-min trend) |
-| SMA | **10, 20, 50** | minute-bars |
-| EMA | **12, 26** | minute-bars |
-| Bollinger Bands | **20** period, **2.0** std dev | minute-bars |
-| ATR | **14** | minute-bars |
-| Momentum | **5** | ~5-minute % change |
-| Volume avg window | **20** bars | rolling volume average |
+|---|---|---|---|
+| RSI | **14** | 14 daily bars |
+| MACD | **8 / 21 / 5** | fast / slow / signal on daily bars (~3-week trend) |
+| SMA | **10, 20, 50** | daily bars |
+| EMA | **12, 26** | daily bars |
+| Bollinger Bands | **20** period, **2.0** std dev | daily bars |
+| ATR | **14** | daily bars |
+| Momentum | **5** | 5-day % change |
+| Volume avg window | **20** bars | rolling daily volume average |
 
 ### Discovery (`trader/stock_discovery.py`)
 
@@ -155,3 +157,4 @@
 | May 18 | Daily summary `spy_value` now initialized before the SPY-bars conditional (was NameError on fetch failure) |
 | May 18 | `RISK_STOP_LOSS_PCT` is the authoritative stop-loss knob; `TA_STOP_LOSS_PCT` kept only as a backwards-compatible env-var alias |
 | May 18 | Cash reservation: each bot only sees its allocation slice of cash, preventing inter-bot races |
+| **Jun 05** | **Daily timeframe migration: equity bot TA switched from 5-min to 1D bars (250-day fetch, forming bar dropped, once-per-day cache), LLM prompt updated to daily semantics, warmup threshold >60, SPY RSI filter on daily RSI (effectively dormant — acceptable). Options bot unchanged (still 5-min via default param).** |
