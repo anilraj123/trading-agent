@@ -3,7 +3,7 @@ import os
 import glob
 from datetime import date, datetime, timedelta
 
-DATA_DIR = "/app/data"
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 HISTORY_FILE = f"{DATA_DIR}/daily_history.csv"
 TRADE_FILE = f"{DATA_DIR}/trade_log.csv"
 LLM_REPORTS_DIR = f"{DATA_DIR}/llm_reports"

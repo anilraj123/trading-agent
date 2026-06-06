@@ -155,7 +155,7 @@ def _get_snapshot_iv(snap):
     return 0.0
 
 def _record_iv_snapshot(symbol, iv):
-    path = "/app/data/iv_history.csv"
+    path = f"{os.getenv('DATA_DIR', '/app/data')}/iv_history.csv"
     write_header = not os.path.exists(path)
     try:
         with open(path, "a", newline="") as f:
