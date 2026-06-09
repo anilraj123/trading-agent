@@ -326,28 +326,52 @@ def _find_contract(trading_client, data_client, symbol, direction, budget):
     return candidates[0][:4]
 
 
-def _get_signal(llm, summary, watchlist):
+def _get_signal(llm, summary, watchlist, ta_scores=None):
+    ta_scores = ta_scores or {}
     allocated = summary['equity'] * ALLOCATED_PCT
     per_pos_budget = allocated * PER_POSITION_PCT
-    prompt = f"""You are an options trader specializing in momentum directionals (long calls/puts). Analyze:
-- Account: ${summary['equity']:.0f} total, ${allocated:.0f} allocated to options
-- Max premium per position: ~${per_pos_budget:.0f}
-- Watchlist ({len(watchlist)} stocks): {', '.join(watchlist)}
-- Open options: {summary.get('open_options', 0)}
-- SPY daily change: {summary.get('spy_pct', 'N/A')}%
 
-ENTRY REQUIREMENTS (all must be met):
-- Daily trend: EMA9 > EMA21 for 2 of last 5 days, RSI 50-75
-- IV >= 0.30 (stock must have sufficient volatility)
-- Max 2 options positions total at any time
-- Contract cost: at most 80% of per-position budget (${per_pos_budget:.0f})
+    # Per-symbol evidence from the TA already computed upstream. Without this the
+    # model only saw a bare ticker list and could not justify any pick, so it held
+    # every cycle. (RSI/MACD/momentum here are on the bot's intraday bars; the
+    # daily-uptrend and IV gates were already enforced before these reached us.)
+    lines = []
+    for s in watchlist:
+        ta = ta_scores.get(s, {})
+        macd = ta.get("macd", {})
+        trend = macd.get("trend") if isinstance(macd, dict) else None
+        price = ta.get("current_price")
+        rsi = ta.get("rsi_14")
+        mom = ta.get("momentum_5")
+        lines.append(
+            f"  {s}: price=${price}, RSI={rsi}, mom5={mom}%, MACD={trend or 'n/a'}"
+        )
+    evidence = "\n".join(lines) if lines else "  (no TA available)"
 
-EXIT DISCIPLINE:
-- Take profit at +50%
-- Dynamic stop: close at -25% loss (≤5 DTE), -40% (6–14 DTE), -55% (>14 DTE)
-- Never hold a losing position past 14 DTE
+    prompt = f"""You are an options trader specializing in momentum directionals (long calls/puts).
 
-Pick ONE symbol and direction from the watchlist (or hold)."""
+The candidates below have ALREADY PASSED the mechanical screens — confirmed daily
+uptrend (EMA9 > EMA21 for 2+ of the last 5 days), implied volatility >= 0.30, and
+liquid options (open interest, spread, and budget all OK). Do NOT re-verify these;
+trust the screens. Your only job is to pick the SINGLE strongest momentum directional
+setup, or hold if none is genuinely compelling.
+
+Account: ${summary['equity']:.0f} total, ${allocated:.0f} to options, ~${per_pos_budget:.0f}/position
+Open options: {summary.get('open_options', 0)} (max 2) | SPY today: {summary.get('spy_pct', 'N/A')}%
+
+CANDIDATES (already trend- and IV-qualified):
+{evidence}
+
+HOW TO CHOOSE:
+- These are all in confirmed daily uptrends, so a long CALL (bullish) is the default.
+- Pick the name with the strongest, cleanest momentum (positive mom5, bullish MACD,
+  RSI showing strength without being blown out).
+- Choose bearish (put) only if a name's intraday momentum has clearly rolled over
+  against the daily trend (negative mom5 + bearish MACD).
+- If no candidate has a decisive momentum edge, hold — but with this many qualified
+  names, a clear leader usually exists.
+
+Pick ONE symbol and direction, or hold."""
     try:
         result = llm.call_structured(OPTIONS_SIGNAL_TOOL, messages=[{"role": "user", "content": [{"type": "text", "text": prompt, "cache_control": {"type": "ephemeral"}}]}], max_tokens=200)
         try:
@@ -583,7 +607,7 @@ class OptionsBot:
                 return
 
             summary = {"equity": equity, "cash": cash, "open_options": len(opt_positions), "spy_pct": spy_pct}
-            signal = _get_signal(self.llm, summary, viable_for_llm)
+            signal = _get_signal(self.llm, summary, viable_for_llm, ta_scores)
             cyc["signal"] = signal
             if signal.get("error"):
                 self.notif.send(f"Options signal error: {signal['error']}", priority="high")
