@@ -13,7 +13,10 @@ class Config:
     LLM_MODEL = os.getenv("LLM_MODEL", "claude-sonnet-4-20250514")
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-    TRADING_CAPITAL_ALLOCATION = float(os.getenv("TRADING_CAPITAL_ALLOCATION", "0.60"))
+    # 1.0 = equity bot uses the full trading slice (options bot paused 2026-06-09).
+    # Was 0.60 when capital was split 60/40 with the options bot. If options is
+    # re-enabled, lower this so both bots' allocations sum to <= 1.0.
+    TRADING_CAPITAL_ALLOCATION = float(os.getenv("TRADING_CAPITAL_ALLOCATION", "1.0"))
     # Lowered 10 -> 6: on a ~$1.3k account, 10 positions made the per-position cap
     # ~$50, which (once the validate_order double-allocation bug was fixed) still
     # rejected the highest-conviction momentum names trading at $56-58. At 6 the cap
@@ -37,7 +40,10 @@ class Config:
     BLACKLIST = [s.strip().upper() for s in os.getenv("BLACKLIST", "").split(",") if s.strip()]
     CRYPTO_SUFFIXES = [s.upper() for s in os.getenv("CRYPTO_SUFFIXES", "USD,USDT,USDC,BTC").split(",") if s.strip()]
     SIMULATED_ACCOUNT_SIZE = float(os.getenv("SIMULATED_ACCOUNT_SIZE", "200"))
-    MAX_STOCK_DEPLOYMENT_PCT = float(os.getenv("MAX_STOCK_DEPLOYMENT_PCT", "0.50"))
+    # 0.95 = deploy nearly all cash into stocks (small buffer for fees/slippage).
+    # Was 0.50 to reserve half the cash as an options buying-power buffer; with the
+    # options bot paused that reservation is no longer needed.
+    MAX_STOCK_DEPLOYMENT_PCT = float(os.getenv("MAX_STOCK_DEPLOYMENT_PCT", "0.95"))
 
     TA_RSI_OVERSOLD = float(os.getenv("TA_RSI_OVERSOLD", "35"))
     TA_RSI_OVERBOUGHT = float(os.getenv("TA_RSI_OVERBOUGHT", "65"))
