@@ -71,8 +71,11 @@ class TradingBot:
         init_stock_positions = [p for p in init_positions if len(p.symbol) <= 10]
         self.risk.sync_from_alpaca(init_stock_positions)
         self.day_start_value = self.account_value
-        # REALLOCATED: 60% to trading, 40% to options (restarted at ~$1.7k equity)
-        self.trading_capital_allocation = 0.60  # 60% trading, 40% options
+        # Options bot paused (2026-06-09, after a -$175 day); equity bot now gets the
+        # full trading slice. Driven by Config so it's a single source of truth and
+        # env-tunable — if options is ever re-enabled, drop this back below 1.0 and
+        # make sure both bots' allocations sum to <= 1.0.
+        self.trading_capital_allocation = Config.TRADING_CAPITAL_ALLOCATION
         logger.info(f"Initial seed: ${self.starting_account_value:.2f} | Deposits loaded: ${self.total_known_deposits:.2f} | Current equity: ${current_equity:.2f} | Account value (seed + PnL): ${self.account_value:.2f}")
 
     def _load_or_init_seed(self) -> float:
