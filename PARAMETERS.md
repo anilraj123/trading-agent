@@ -161,3 +161,4 @@
 | Jun 08 | `validate_order` double-allocation bug fixed: it re-applied `TRADING_CAPITAL_ALLOCATION` to an already-allocated `trading_capital`, making `max_position` 0.6× too tight and silently rejecting valid buys (e.g. $56 vs nominal $50 cap). Now uses the same anchor as the `_execute_decisions` soft cap. |
 | Jun 08 | `TARGET_POSITIONS`: 10 → **6**. At ~$1.3k equity, 10 positions floored per-position size to ~$50, rejecting the highest-conviction names ($56-58); 6 lifts the cap to ~$73. |
 | Jun 08 | Monitoring: paused cycles (daily trade-cap / loss-limit) now emit a `stage=paused` record to `cycle_log.jsonl` so monitoring doesn't go dark after the cap is hit. |
+| Jun 08 | `RISK_MAX_TRADES_PER_DAY`: flat 5 → **2× TARGET_POSITIONS** (=12 at 6). The old 5 was sized for 5-min churn and throttled legitimate daily rebalancing (a 6-position rotate = sell 3 + buy 3 = 6 > 5). Forced exits still excluded. `.env` override removed so the tied default governs. |

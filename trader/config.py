@@ -23,7 +23,12 @@ class Config:
     # Stop-loss fraction (negative). Falls back to legacy TA_STOP_LOSS_PCT for
     # backward compatibility with existing .env files; RISK_STOP_LOSS_PCT wins if set.
     RISK_STOP_LOSS_PCT = float(os.getenv("RISK_STOP_LOSS_PCT", os.getenv("TA_STOP_LOSS_PCT", "-0.03")))
-    RISK_MAX_TRADES_PER_DAY = int(os.getenv("RISK_MAX_TRADES_PER_DAY", "5"))
+    # Voluntary-trade circuit breaker (forced exits — stops/expiry — don't count).
+    # Defaults to 2x TARGET_POSITIONS so the bot can fully establish OR rotate its
+    # book in a day (sell all + buy all) without freezing mid-rebalance, while still
+    # tripping on a genuine runaway loop. The old flat 5 was sized for the 5-min
+    # churn era and throttled legitimate daily rebalancing. Env var still overrides.
+    RISK_MAX_TRADES_PER_DAY = int(os.getenv("RISK_MAX_TRADES_PER_DAY", str(TARGET_POSITIONS * 2)))
     RISK_MAX_HOLDING_DAYS = int(os.getenv("RISK_MAX_HOLDING_DAYS", "3"))
     RISK_MIN_CONFIDENCE = float(os.getenv("RISK_MIN_CONFIDENCE", "0.6"))
 
