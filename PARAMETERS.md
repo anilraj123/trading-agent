@@ -158,3 +158,6 @@
 | May 18 | `RISK_STOP_LOSS_PCT` is the authoritative stop-loss knob; `TA_STOP_LOSS_PCT` kept only as a backwards-compatible env-var alias |
 | May 18 | Cash reservation: each bot only sees its allocation slice of cash, preventing inter-bot races |
 | **Jun 05** | **Daily timeframe migration: equity bot TA switched from 5-min to 1D bars (250-day fetch, forming bar dropped, once-per-day cache), LLM prompt updated to daily semantics, warmup threshold >60, SPY RSI filter on daily RSI (effectively dormant — acceptable). Options bot unchanged (still 5-min via default param).** |
+| Jun 08 | `validate_order` double-allocation bug fixed: it re-applied `TRADING_CAPITAL_ALLOCATION` to an already-allocated `trading_capital`, making `max_position` 0.6× too tight and silently rejecting valid buys (e.g. $56 vs nominal $50 cap). Now uses the same anchor as the `_execute_decisions` soft cap. |
+| Jun 08 | `TARGET_POSITIONS`: 10 → **6**. At ~$1.3k equity, 10 positions floored per-position size to ~$50, rejecting the highest-conviction names ($56-58); 6 lifts the cap to ~$73. |
+| Jun 08 | Monitoring: paused cycles (daily trade-cap / loss-limit) now emit a `stage=paused` record to `cycle_log.jsonl` so monitoring doesn't go dark after the cap is hit. |

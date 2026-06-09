@@ -83,7 +83,13 @@ class RiskManager:
 
         return True, "OK"
 
-    def validate_order(self, decision: dict, portfolio_value: float, cash: float, current_positions: list) -> tuple[bool, str]:
+    def validate_order(self, decision: dict, trading_capital: float, cash: float, current_positions: list) -> tuple[bool, str]:
+        # `trading_capital` is the caller's ALREADY-ALLOCATED slice (account_value ×
+        # TRADING_CAPITAL_ALLOCATION). Do NOT re-apply the allocation here — doing so
+        # double-counted it and made max_position 0.6× tighter than the soft cap in
+        # _execute_decisions, silently rejecting valid buys (e.g. a $56 position vs a
+        # nominal $50 cap that should have been ~$73). This now uses the same anchor as
+        # the caller's per_trade_size, so the two gates agree.
         symbol = decision.get("symbol")
         action = decision.get("action")
         quantity = decision.get("quantity", 0)
@@ -103,7 +109,6 @@ class RiskManager:
                 return False, "Invalid buy quantity"
 
             position_value = quantity * current_price
-            trading_capital = portfolio_value * Config.TRADING_CAPITAL_ALLOCATION
             per_trade_size = trading_capital / Config.TARGET_POSITIONS
             max_position = max(50, min(per_trade_size, 2000))
             if position_value > max_position:
