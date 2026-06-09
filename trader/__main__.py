@@ -162,6 +162,23 @@ class TradingBot:
             if not can_trade:
                 logger.warning(f"Trading paused: {reason}")
                 self.notif.notify_daily_loss_limit(self.risk.daily_pnl + stock_unrealized, Config.RISK_DAILY_LOSS_LIMIT / 100 * self.trading_capital)
+                # Log the paused cycle so monitoring doesn't go dark once the daily
+                # trade cap / loss limit halts trading (these cycles return before the
+                # normal cycle-logging point below).
+                try:
+                    from .tracker import log_cycle
+                    log_cycle({
+                        "bot": "trading",
+                        "cycle": self.cycle_count,
+                        "stage": "paused",
+                        "reason": reason,
+                        "equity": portfolio.get("total_value"),
+                        "cash": portfolio.get("cash"),
+                        "daily_pnl": self.risk.daily_pnl + stock_unrealized,
+                        "trades_today": self.risk.daily_trades,
+                    })
+                except Exception as e:
+                    logger.debug(f"paused-cycle logging failed: {e}")
                 return
 
             stop_loss_orders = self.risk.check_stop_losses(positions)

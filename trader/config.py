@@ -14,7 +14,11 @@ class Config:
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
     TRADING_CAPITAL_ALLOCATION = float(os.getenv("TRADING_CAPITAL_ALLOCATION", "0.60"))
-    TARGET_POSITIONS = int(os.getenv("TARGET_POSITIONS", "10"))
+    # Lowered 10 -> 6: on a ~$1.3k account, 10 positions made the per-position cap
+    # ~$50, which (once the validate_order double-allocation bug was fixed) still
+    # rejected the highest-conviction momentum names trading at $56-58. At 6 the cap
+    # is ~$73, so top candidates can actually fill. Revisit as equity grows.
+    TARGET_POSITIONS = int(os.getenv("TARGET_POSITIONS", "6"))
     RISK_DAILY_LOSS_LIMIT = float(os.getenv("RISK_DAILY_LOSS_LIMIT", "-5.00"))
     # Stop-loss fraction (negative). Falls back to legacy TA_STOP_LOSS_PCT for
     # backward compatibility with existing .env files; RISK_STOP_LOSS_PCT wins if set.
