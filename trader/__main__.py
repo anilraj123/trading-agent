@@ -643,8 +643,20 @@ class TradingBot:
                 decision["quantity"] = quantity
                 logger.info(f"SPY reduced regime: halved {symbol} qty to {quantity} (buy_score={sym_buy_score:.2f})")
 
-            # Same-day sells are now permitted. FINRA replaced the PDT framework
-            # with an intraday margin system on June 4, 2026.
+            # Minimum-hold guard on VOLUNTARY sells. PDT no longer blocks same-day
+            # round-trips (FINRA's June 4 2026 intraday-margin change), but our edge
+            # is a DAILY-bar trend hold and the TA is cached once per day — so an
+            # LLM sell on the same calendar day it bought is reacting to intraday
+            # noise against an unchanged signal, not the validated signal. Block it.
+            # Hard stops and expiry exits run on separate paths and are unaffected.
+            if action == "SELL" and Config.RISK_MIN_HOLDING_DAYS > 0:
+                entry_dt = self.risk.position_entry_dates.get(symbol)
+                if entry_dt is not None:
+                    held_days = (datetime.now().date() - entry_dt.date()).days
+                    if held_days < Config.RISK_MIN_HOLDING_DAYS:
+                        logger.info(f"Blocking voluntary SELL {symbol}: held {held_days}d < min {Config.RISK_MIN_HOLDING_DAYS}d")
+                        action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": f"Min holding period ({held_days}d < {Config.RISK_MIN_HOLDING_DAYS}d)"})
+                        continue
 
             # Pass the trader's reserved cash slice (not raw account cash) so the
             # validator's "not enough cash" check matches the soft reservation above.

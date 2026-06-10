@@ -33,6 +33,13 @@ class Config:
     # churn era and throttled legitimate daily rebalancing. Env var still overrides.
     RISK_MAX_TRADES_PER_DAY = int(os.getenv("RISK_MAX_TRADES_PER_DAY", str(TARGET_POSITIONS * 2)))
     RISK_MAX_HOLDING_DAYS = int(os.getenv("RISK_MAX_HOLDING_DAYS", "3"))
+    # Minimum days a position must be held before a VOLUNTARY (LLM-driven) sell is
+    # allowed. Hard stops (RISK_STOP_LOSS_PCT) and expiry exits ignore this. The
+    # edge was validated on DAILY bars held for days, but the TA is cached once per
+    # day, so any same-day sell-after-buy is the LLM flip-flopping on intraday price
+    # noise against an unchanged signal (see Jun 10 churn: DHR/TJX round-tripped in
+    # <30 min). 1 = can't voluntarily exit until at least the next session.
+    RISK_MIN_HOLDING_DAYS = int(os.getenv("RISK_MIN_HOLDING_DAYS", "1"))
     RISK_MIN_CONFIDENCE = float(os.getenv("RISK_MIN_CONFIDENCE", "0.6"))
 
     TRADING_INTERVAL_MINUTES = int(os.getenv("TRADING_INTERVAL_MINUTES", "15"))

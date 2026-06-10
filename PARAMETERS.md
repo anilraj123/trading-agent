@@ -11,6 +11,7 @@
 | `RISK_STOP_LOSS_PCT` | **-0.03** (-3%) | Stop-loss % from entry |
 | `RISK_MAX_TRADES_PER_DAY` | **5** | Max trades per day |
 | `RISK_MAX_HOLDING_DAYS` | **3** | Force-sell position after N days |
+| `RISK_MIN_HOLDING_DAYS` | **1** | Min days before a *voluntary* (LLM) sell is allowed; hard stops & expiry exempt |
 | `RISK_MIN_CONFIDENCE` | **0.6** | Minimum LLM confidence to accept a signal |
 
 ### Allocation (`trader/__main__.py`)
@@ -164,4 +165,5 @@
 | Jun 08 | `RISK_MAX_TRADES_PER_DAY`: flat 5 → **2× TARGET_POSITIONS** (=12 at 6). The old 5 was sized for 5-min churn and throttled legitimate daily rebalancing (a 6-position rotate = sell 3 + buy 3 = 6 > 5). Forced exits still excluded. `.env` override removed so the tied default governs. |
 | Jun 09 | Options signal fix: bot held 100% of cycles because `_get_signal` passed the LLM only a bare ticker list while demanding it verify trend/RSI/IV criteria it had no data for. Now feeds the already-computed per-symbol TA (RSI/MACD-trend/momentum/price) and reframes the prompt — candidates are pre-qualified (daily uptrend + IV≥0.30 + liquid), so the LLM just picks the strongest momentum directional. |
 | Jun 09 | **Options bot paused** (lost $175 / ~11% of account in one flat-market day buying doomed cheap far-OTM short-DTE calls; it also has no daily-loss/trade circuit breaker). `docker compose stop options-bot` on the droplet. |
+| Jun 10 | **`RISK_MIN_HOLDING_DAYS` added (=1).** Live bot was churning intraday — voluntary LLM sells round-tripped positions in <30 min (DHR, TJX on Jun 10) even though the daily-bar TA is cached once/day, so the sells reacted to price noise against an unchanged signal. The edge was validated on multi-day daily-bar holds, so same-day voluntary exits were never part of the strategy. Now blocks voluntary sells until the next session; hard stops (`RISK_STOP_LOSS_PCT`) and expiry exits are exempt. Also fixes cash-stranding: the churn burned the daily trade cap, then stops freed cash the bot couldn't redeploy. |
 | Jun 09 | **100% of capital to stocks.** `TRADING_CAPITAL_ALLOCATION` 0.60 → **1.0** (equity bot now sources its allocation from Config instead of a hardcoded 0.60), and `MAX_STOCK_DEPLOYMENT_PCT` 0.50 → **0.95** (the 50% cash reservation was an options buffer no longer needed). Deposit-exclusion in `account_value` is unchanged, so sizing is still off principal+PnL, not deposited cash. |
