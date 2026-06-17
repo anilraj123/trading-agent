@@ -51,6 +51,50 @@ def _max_position_size(account_value: float) -> float:
     return Config.max_position_dollars(account_value * Config.TRADING_CAPITAL_ALLOCATION)
 
 
+def needs_llm_review(technical_analysis: dict, stock_positions: list, regime_mode: str,
+                     buy_threshold: float, sell_threshold: float,
+                     near_stop_pct: float) -> bool:
+    """Decide whether a cycle has anything for the LLM to act on.
+
+    Returns True if EITHER a buy candidate clears the (regime-adjusted) buy bar,
+    OR a held position warrants a discretionary sell review — its sell signal has
+    fired, or its P&L has fallen to within `near_stop_pct` of the stop. When this
+    is False the LLM would only return HOLD, so the call can be skipped to save
+    cost. This is behaviour-neutral: deterministic stop-losses and holding-period
+    exits run earlier in the cycle, independent of the LLM. And with no buy
+    candidate there is nothing to rotate into, so holding a position the LLM might
+    otherwise trim costs nothing (it would only raise idle cash).
+
+    `stock_positions` are dicts with `symbol`, `market_value`, `unrealized_pl`
+    (equity positions only). `technical_analysis` maps symbol -> TA dict with a
+    nested `score.{buy_score,sell_score}`; held positions may be absent from it
+    (out of the current watchlist), in which case only their P&L is evaluated.
+    """
+    # Buys — a blocked regime permits none; a reduced regime raises the bar to 3.0.
+    if regime_mode == "blocked":
+        has_buy_candidate = False
+    else:
+        eff_buy = max(buy_threshold, 3.0) if regime_mode == "reduced" else buy_threshold
+        has_buy_candidate = any(
+            ((d or {}).get("score", {}) or {}).get("buy_score", 0) >= eff_buy
+            for d in technical_analysis.values()
+        )
+    if has_buy_candidate:
+        return True
+
+    # Sells — a held position approaching its stop, or showing a sell signal.
+    for p in stock_positions:
+        upl = p.get("unrealized_pl") or 0.0
+        cost_basis = (p.get("market_value") or 0.0) - upl  # qty * avg_entry_price
+        pnl_pct = (upl / cost_basis * 100) if cost_basis > 0 else 0.0
+        if pnl_pct <= near_stop_pct:
+            return True
+        ta = technical_analysis.get(p.get("symbol"))
+        if ta and ((ta.get("score", {}) or {}).get("sell_score", 0)) >= sell_threshold:
+            return True
+    return False
+
+
 def _build_system_prompt(account_value: float = None) -> str:
     if account_value is None:
         account_value = Config.SIMULATED_ACCOUNT_SIZE
@@ -281,7 +325,7 @@ DECISION RULES:
 1. BUY when buy_score >= {Config.TA_MIN_BUY_SCORE} (momentum confirmation signals)
 2. SELL: do not recommend SELL on a position unless EITHER:
    a. sell_score >= {Config.TA_MIN_SELL_SCORE:.1f} (deterministic signal), OR
-   b. unrealized P&L <= -2.5% (approaching stop), OR
+   b. unrealized P&L <= {Config.LLM_SELL_REVIEW_PNL_PCT:.1f}% (approaching stop), OR
    c. DTE-based rule applies (options only)
 3. Use stop loss at {Config.TA_STOP_LOSS_PCT:.0%} from entry price
 4. Position size max ${max_pos:.0f} per trade (target {target_pos} concurrent positions)

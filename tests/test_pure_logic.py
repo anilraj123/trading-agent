@@ -32,7 +32,7 @@ os.environ["TARGET_POSITIONS"] = "10"
 
 from trader.config import Config
 from trader.technical_analysis import TechnicalAnalysis
-from trader.llm_engine import _max_position_size
+from trader.llm_engine import _max_position_size, needs_llm_review
 
 # Import options bot pure functions by patching heavy deps at module level
 from unittest.mock import patch
@@ -247,3 +247,56 @@ class TestEquityScaledFormulas:
     def test_explicit_pin_overrides_scaling(self):
         with patch.object(Config, "_RISK_MAX_TRADES_OVERRIDE", "12"):
             assert Config.max_trades_per_day(1_000_000) == 12
+
+
+class TestNeedsLlmReview:
+    """Idle-cycle gate: skip the LLM only when there's nothing to decide.
+    buy_threshold=1.0, sell_threshold=1.0, near_stop_pct=-2.5 throughout."""
+
+    BUY = 1.0
+    SELL = 1.0
+    NEAR = -2.5
+
+    def _ta(self, buy=0.0, sell=0.0):
+        return {"ABC": {"score": {"buy_score": buy, "sell_score": sell}}}
+
+    def _pos(self, symbol="XYZ", mv=102.0, upl=2.0):
+        # cost basis = mv - upl; pnl% = upl / cost * 100
+        return {"symbol": symbol, "market_value": mv, "unrealized_pl": upl}
+
+    def call(self, ta, positions, regime="normal"):
+        return needs_llm_review(ta, positions, regime, self.BUY, self.SELL, self.NEAR)
+
+    def test_buy_candidate_above_bar(self):
+        assert self.call(self._ta(buy=1.5), []) is True
+
+    def test_buy_candidate_below_bar(self):
+        assert self.call(self._ta(buy=0.5), []) is False
+
+    def test_fully_idle_is_skipped(self):
+        # no buy candidate, one healthy position with a weak sell signal
+        assert self.call(self._ta(buy=0.4), [self._pos(mv=105, upl=5)]) is False
+
+    def test_position_approaching_stop(self):
+        # pnl = -3% (<= -2.5) → review even with no buy candidate, no TA on the name
+        assert self.call({}, [self._pos(mv=97, upl=-3)]) is True
+
+    def test_position_just_above_near_stop(self):
+        # pnl = -2.0% (> -2.5) → still idle
+        assert self.call({}, [self._pos(mv=98, upl=-2)]) is False
+
+    def test_position_sell_signal_fires(self):
+        ta = {"XYZ": {"score": {"buy_score": 0.0, "sell_score": 1.2}}}
+        assert self.call(ta, [self._pos(symbol="XYZ", mv=110, upl=10)]) is True
+
+    def test_blocked_regime_ignores_buy_candidate(self):
+        # SPY hard-block: a strong buy candidate must NOT force an LLM call
+        assert self.call(self._ta(buy=5.0), [self._pos()], regime="blocked") is False
+
+    def test_reduced_regime_raises_buy_bar_to_3(self):
+        assert self.call(self._ta(buy=2.5), [], regime="reduced") is False   # below 3.0
+        assert self.call(self._ta(buy=3.0), [], regime="reduced") is True    # meets 3.0
+
+    def test_position_without_ta_uses_pnl_only(self):
+        # held name absent from technical_analysis, healthy P&L → idle
+        assert self.call(self._ta(buy=0.0), [self._pos(symbol="NOTA", mv=101, upl=1)]) is False

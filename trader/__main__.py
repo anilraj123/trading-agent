@@ -12,7 +12,7 @@ from rich.panel import Panel
 
 from .config import Config
 from .alpaca_client import AlpacaClient
-from .llm_engine import LLMEngine
+from .llm_engine import LLMEngine, needs_llm_review
 from .risk_manager import RiskManager
 from .technical_analysis import TechnicalAnalysis
 from .stock_discovery import StockDiscovery
@@ -227,33 +227,55 @@ class TradingBot:
                 portfolio["spy_regime_mode"] = "normal"
             self._last_regime_mode = portfolio["spy_regime_mode"]
 
-            decisions, llm_prompt, llm_response = self.llm.get_trading_decision(portfolio, account_value=self.trading_capital)
-            if "error" in decisions:
-                self.notif.send(f"LLM parse error: {decisions.get('summary')}", priority="high")
-            try:
-                actions_taken = self._execute_decisions(decisions, portfolio)
-            except Exception as e:
-                logger.error(f"Executing decisions failed (LLM report still sent): {e}")
-                actions_taken = []
-            sys_prompt = llm_prompt.split("USER:\n", 1)[0].replace("SYSTEM:\n", "")
-            usr_prompt = llm_prompt.split("USER:\n", 1)[1] if "USER:\n" in llm_prompt else llm_prompt
-            self.email_notifier.send_llm_report(
-                system_prompt=sys_prompt,
-                user_prompt=usr_prompt,
-                raw_response=llm_response,
-                decisions=decisions,
-                actions_taken=actions_taken
+            # Cost gate: only call the LLM when there's something for it to decide —
+            # a buy candidate above the bar or a held position needing a sell review.
+            # Otherwise it would just return HOLD. Deterministic stops/expiry already
+            # ran above, so skipping here is behaviour-neutral. See needs_llm_review().
+            stock_position_dicts = [p for p in portfolio.get("positions", []) if len(p.get("symbol", "")) <= 10]
+            llm_needed = (not Config.LLM_SKIP_IDLE_CYCLES) or needs_llm_review(
+                portfolio.get("technical_analysis", {}),
+                stock_position_dicts,
+                portfolio.get("spy_regime_mode", "normal"),
+                Config.TA_MIN_BUY_SCORE,
+                Config.TA_MIN_SELL_SCORE,
+                Config.LLM_SELL_REVIEW_PNL_PCT,
             )
+
+            llm_prompt = llm_response = None
+            sys_prompt = usr_prompt = ""
+            if llm_needed:
+                decisions, llm_prompt, llm_response = self.llm.get_trading_decision(portfolio, account_value=self.trading_capital)
+                if "error" in decisions:
+                    self.notif.send(f"LLM parse error: {decisions.get('summary')}", priority="high")
+                try:
+                    actions_taken = self._execute_decisions(decisions, portfolio)
+                except Exception as e:
+                    logger.error(f"Executing decisions failed (LLM report still sent): {e}")
+                    actions_taken = []
+                sys_prompt = llm_prompt.split("USER:\n", 1)[0].replace("SYSTEM:\n", "")
+                usr_prompt = llm_prompt.split("USER:\n", 1)[1] if "USER:\n" in llm_prompt else llm_prompt
+                self.email_notifier.send_llm_report(
+                    system_prompt=sys_prompt,
+                    user_prompt=usr_prompt,
+                    raw_response=llm_response,
+                    decisions=decisions,
+                    actions_taken=actions_taken
+                )
+            else:
+                decisions = {"decisions": [], "summary": "Idle cycle — no buy candidate above threshold and no position needs review; LLM call skipped."}
+                actions_taken = []
+                logger.info("Idle cycle — LLM call skipped (no buy candidate above threshold, no position needs review)")
 
             # Structured monitoring logs (best-effort; never blocks trading).
             try:
                 from .tracker import log_cycle, log_llm_call
-                log_llm_call(
-                    "trading", getattr(self.llm, "last_model", None),
-                    sys_prompt, usr_prompt, llm_response,
-                    usage=getattr(self.llm, "last_usage", {}),
-                    parse_ok="error" not in decisions,
-                )
+                if llm_response is not None:
+                    log_llm_call(
+                        "trading", getattr(self.llm, "last_model", None),
+                        sys_prompt, usr_prompt, llm_response,
+                        usage=getattr(self.llm, "last_usage", {}),
+                        parse_ok="error" not in decisions,
+                    )
                 ta = portfolio.get("technical_analysis", {})
                 log_cycle({
                     "bot": "trading",
@@ -280,6 +302,7 @@ class TradingBot:
                     ],
                     "decisions": decisions.get("decisions", []),
                     "actions": actions_taken,
+                    "llm_skipped": llm_response is None,
                     "market_outlook": decisions.get("market_outlook"),
                     "summary": decisions.get("summary"),
                 })
