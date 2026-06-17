@@ -601,8 +601,7 @@ class TradingBot:
                 # Previously this used self.account_value, which is the un-allocated base — that made
                 # the soft cap looser than the validator's, so it was effectively dead. Keeping them
                 # in sync means a change to TARGET_POSITIONS scales both gates consistently.
-                per_trade_size = self.trading_capital / Config.TARGET_POSITIONS
-                max_position_value = max(50, min(per_trade_size, 2000))
+                max_position_value = Config.max_position_dollars(self.trading_capital)
                 cost = quantity * price
 
                 if cost > available_cash:
@@ -741,8 +740,8 @@ class TradingBot:
             f"[bold green]AI Trading Agent Started[/]\n"
             f"Discovery: Dynamic (100-stock universe + live trending)\n"
             f"Strategy: {strategy_label}\n"
-            f"Stop Loss: {stop_label} | Max Position: ${max(50, min(self.starting_account_value * Config.TRADING_CAPITAL_ALLOCATION / Config.TARGET_POSITIONS, 2000)):.0f}\n"
-            f"Interval: {Config.TRADING_INTERVAL_MINUTES}min | Max trades/day: {Config.RISK_MAX_TRADES_PER_DAY}\n"
+            f"Stop Loss: {stop_label} | Max Position: ${Config.max_position_dollars(self.starting_account_value * Config.TRADING_CAPITAL_ALLOCATION):.0f}\n"
+            f"Interval: {Config.TRADING_INTERVAL_MINUTES}min | Max trades/day: {Config.max_trades_per_day(self.starting_account_value * Config.TRADING_CAPITAL_ALLOCATION)}\n"
             f"Account: ${self.starting_account_value:.0f}",
             title="Bot Config",
             border_style="green"

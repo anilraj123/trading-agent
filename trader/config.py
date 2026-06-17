@@ -1,3 +1,4 @@
+import math
 import os
 from dotenv import load_dotenv
 
@@ -17,11 +18,13 @@ class Config:
     # Was 0.60 when capital was split 60/40 with the options bot. If options is
     # re-enabled, lower this so both bots' allocations sum to <= 1.0.
     TRADING_CAPITAL_ALLOCATION = float(os.getenv("TRADING_CAPITAL_ALLOCATION", "1.0"))
-    # Lowered 10 -> 6: on a ~$1.3k account, 10 positions made the per-position cap
-    # ~$50, which (once the validate_order double-allocation bug was fixed) still
-    # rejected the highest-conviction momentum names trading at $56-58. At 6 the cap
-    # is ~$73, so top candidates can actually fill. Revisit as equity grows.
-    TARGET_POSITIONS = int(os.getenv("TARGET_POSITIONS", "6"))
+    # TARGET_POSITIONS is now the BASE book size at TARGET_POSITIONS_REF_CAPITAL,
+    # not a fixed count. The live book size grows with equity via target_positions()
+    # below — a fixed count over-concentrates as equity scales (8 names × $125k at
+    # $1M). Call sites should use Config.target_positions(trading_capital), NOT this
+    # raw attribute, for anything equity-sensitive. Kept as an attribute for the
+    # baseline/display and as the formula's anchor.
+    TARGET_POSITIONS = int(os.getenv("TARGET_POSITIONS", "8"))
     RISK_DAILY_LOSS_LIMIT = float(os.getenv("RISK_DAILY_LOSS_LIMIT", "-5.00"))
     # Stop-loss fraction (negative). Falls back to legacy TA_STOP_LOSS_PCT for
     # backward compatibility with existing .env files; RISK_STOP_LOSS_PCT wins if set.
@@ -31,7 +34,27 @@ class Config:
     # book in a day (sell all + buy all) without freezing mid-rebalance, while still
     # tripping on a genuine runaway loop. The old flat 5 was sized for the 5-min
     # churn era and throttled legitimate daily rebalancing. Env var still overrides.
-    RISK_MAX_TRADES_PER_DAY = int(os.getenv("RISK_MAX_TRADES_PER_DAY", str(TARGET_POSITIONS * 2)))
+    # If RISK_MAX_TRADES_PER_DAY is explicitly pinned in the env it is a MANUAL
+    # override (a flat cap). Otherwise the live cap is RISK_MAX_TRADES_MULT × the
+    # equity-scaled book size — see max_trades_per_day(). _OVERRIDE is None when
+    # unpinned; RISK_MAX_TRADES_PER_DAY stays as the baseline for display/fallback.
+    _RISK_MAX_TRADES_OVERRIDE = os.getenv("RISK_MAX_TRADES_PER_DAY")
+    RISK_MAX_TRADES_MULT = int(os.getenv("RISK_MAX_TRADES_MULT", "2"))
+    RISK_MAX_TRADES_PER_DAY = int(_RISK_MAX_TRADES_OVERRIDE) if _RISK_MAX_TRADES_OVERRIDE else TARGET_POSITIONS * RISK_MAX_TRADES_MULT
+
+    # --- Equity-scaled position sizing -------------------------------------
+    # Percentages are scale-invariant, but a fixed book size and a hardcoded
+    # dollar position cap break as equity grows: at $1M, the old
+    # max(50, min(slice, 2000)) clamp clipped every order to $2,000, deploying
+    # ~$16k of $1M. So the book size scales logarithmically with trading capital
+    # and the per-position cap is an equal-weight slice with a *percentage* hard
+    # cap — no absolute dollar ceiling. All knobs are env-tunable.
+    TARGET_POSITIONS_REF_CAPITAL = float(os.getenv("TARGET_POSITIONS_REF_CAPITAL", "1000"))  # equity where book = TARGET_POSITIONS
+    TARGET_POSITIONS_PER_10X = float(os.getenv("TARGET_POSITIONS_PER_10X", "6"))             # +N names per 10× capital
+    TARGET_POSITIONS_MIN = int(os.getenv("TARGET_POSITIONS_MIN", "5"))
+    TARGET_POSITIONS_MAX = int(os.getenv("TARGET_POSITIONS_MAX", "25"))                       # < ranked-watchlist depth (30)
+    POSITION_HARD_CAP_PCT = float(os.getenv("POSITION_HARD_CAP_PCT", "0.25"))                 # no single position > this fraction of capital
+    POSITION_MIN_DOLLARS = float(os.getenv("POSITION_MIN_DOLLARS", "10"))                     # floor so tiny accounts can still place an order
     RISK_MAX_HOLDING_DAYS = int(os.getenv("RISK_MAX_HOLDING_DAYS", "3"))
     # Minimum days a position must be held before a VOLUNTARY (LLM-driven) sell is
     # allowed. Hard stops (RISK_STOP_LOSS_PCT) and expiry exits ignore this. The
@@ -85,6 +108,34 @@ class Config:
     EMAIL_TO = os.getenv("EMAIL_TO", "")
     EMAIL_FROM = os.getenv("EMAIL_FROM", "")
     EMAIL_API_KEY = os.getenv("EMAIL_API_KEY", "")
+
+    @staticmethod
+    def target_positions(trading_capital: float) -> int:
+        """Live book size: TARGET_POSITIONS at TARGET_POSITIONS_REF_CAPITAL, growing
+        ~logarithmically with trading capital (+TARGET_POSITIONS_PER_10X names per 10×),
+        clamped to [TARGET_POSITIONS_MIN, TARGET_POSITIONS_MAX]. Below the reference
+        capital it floors at the base. Drives per-position size and the daily trade cap."""
+        ref = Config.TARGET_POSITIONS_REF_CAPITAL
+        n = Config.TARGET_POSITIONS + Config.TARGET_POSITIONS_PER_10X * math.log10(max(trading_capital, ref) / ref)
+        return int(max(Config.TARGET_POSITIONS_MIN, min(round(n), Config.TARGET_POSITIONS_MAX)))
+
+    @staticmethod
+    def max_position_dollars(trading_capital: float) -> float:
+        """Per-position dollar cap: equal-weight slice (capital ÷ live book size),
+        floored at POSITION_MIN_DOLLARS and capped at POSITION_HARD_CAP_PCT of capital.
+        Replaces the hardcoded max(50, min(slice, 2000)) that broke at high equity."""
+        if trading_capital <= 0:
+            return Config.POSITION_MIN_DOLLARS
+        per_trade = trading_capital / Config.target_positions(trading_capital)
+        return max(Config.POSITION_MIN_DOLLARS, min(per_trade, trading_capital * Config.POSITION_HARD_CAP_PCT))
+
+    @staticmethod
+    def max_trades_per_day(trading_capital: float) -> int:
+        """Daily voluntary-trade cap. An explicit RISK_MAX_TRADES_PER_DAY env pin wins
+        (manual flat cap); otherwise RISK_MAX_TRADES_MULT × the equity-scaled book size."""
+        if Config._RISK_MAX_TRADES_OVERRIDE:
+            return int(Config._RISK_MAX_TRADES_OVERRIDE)
+        return Config.RISK_MAX_TRADES_MULT * Config.target_positions(trading_capital)
 
     @staticmethod
     def get_notification_config() -> dict:

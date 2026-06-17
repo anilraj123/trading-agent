@@ -135,8 +135,7 @@ class NotificationManager:
         if account_value is None:
             account_value = Config.SIMULATED_ACCOUNT_SIZE
         trading_capital = account_value * Config.TRADING_CAPITAL_ALLOCATION
-        per_trade_size = trading_capital / Config.TARGET_POSITIONS
-        max_pos = max(50, min(per_trade_size, 2000))
+        max_pos = Config.max_position_dollars(trading_capital)
 
         if not strategy_info:
             strategy_info = f"Active (RSI {Config.TA_RSI_OVERSOLD}/{Config.TA_RSI_OVERBOUGHT})"
