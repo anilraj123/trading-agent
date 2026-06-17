@@ -9,7 +9,7 @@
 | `RISK_MAX_POSITION_PCT` | **0.10** (10%) | Max single position as fraction of portfolio |
 | `RISK_DAILY_LOSS_LIMIT` | **-5.00** (-5%) | Daily loss % that halts trading |
 | `RISK_STOP_LOSS_PCT` | **-0.03** (-3%) | Stop-loss % from entry |
-| `RISK_MAX_TRADES_PER_DAY` | **5** | Max trades per day |
+| `RISK_MAX_TRADES_PER_DAY` | **16** | Max trades per day (2× `TARGET_POSITIONS`) |
 | `RISK_MAX_HOLDING_DAYS` | **3** | Force-sell position after N days |
 | `RISK_MIN_HOLDING_DAYS` | **1** | Min days before a *voluntary* (LLM) sell is allowed; hard stops & expiry exempt |
 | `RISK_MIN_CONFIDENCE` | **0.6** | Minimum LLM confidence to accept a signal |
@@ -19,6 +19,7 @@
 | Parameter | Current | Description |
 |---|---|---|
 | `trading_capital_allocation` | **0.60** (60%) | Account fraction for stock trading (remainder to options) |
+| `TARGET_POSITIONS` | **8** | Target concurrent positions; per-position size = trading_capital ÷ this. Drives `RISK_MAX_TRADES_PER_DAY` default (2×). |
 | `MIN_NOTIONAL` | **$10** | Minimum order notional value |
 | `status_interval` | **4** cycles | Heartbeat notification every N cycles |
 | `unexpected_change > 5.0` | **$5** | Deposit detection threshold (ignore smaller equity fluctuations) |
@@ -141,6 +142,8 @@
 | Date | Change |
 |---|---|
 | Jun 17 | `LLM_MODEL`: `claude-sonnet-4-20250514` → **`claude-sonnet-4-6`** — old Sonnet 4 was retired by Anthropic (every cycle 404'd → no LLM trades since ~Jun 16). Same Sonnet tier, same cost profile. Also hotfixed on droplet `.env` + recreated container. |
+| Jun 17 | `TARGET_POSITIONS`: 6 → **8** — spread the full 100%-stock allocation across more names so less cash sits idle when signals qualify. Per-position size drops ~$190 → ~$169 on a $1.1k account. Set via droplet `.env` override. |
+| Jun 17 | `RISK_MAX_TRADES_PER_DAY`: 12 → **16** — re-tied to 2× `TARGET_POSITIONS` (now 8) so the bot can establish all 8 + rotate in one day. Set explicitly in droplet `.env` (not removed) to avoid the stale-image-default trap. |
 | May 18 | Removed broken auto-deposit detection (was creating phantom deposits, corrupting P&L) |
 | May 18 | Options no-stack: bot skips symbols already held in open positions |
 | May 18 | MACD: 12/26/9 → **8/21/5** on minute bars (shorter intraday trend capture) |
