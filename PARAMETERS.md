@@ -141,6 +141,7 @@
 
 | Date | Change |
 |---|---|
+| Jun 17 | `LLM_MODEL`: `claude-sonnet-4-20250514` → **`claude-sonnet-4-6`** — old Sonnet 4 was retired by Anthropic (every cycle 404'd → no LLM trades since ~Jun 16). Same Sonnet tier, same cost profile. Also hotfixed on droplet `.env` + recreated container. |
 | Jun 17 | `TARGET_POSITIONS`: 6 → **8** — spread the full 100%-stock allocation across more names so less cash sits idle when signals qualify. Per-position size drops ~$190 → ~$169 on a $1.1k account. Set via droplet `.env` override. |
 | Jun 17 | `RISK_MAX_TRADES_PER_DAY`: 12 → **16** — re-tied to 2× `TARGET_POSITIONS` (now 8) so the bot can establish all 8 + rotate in one day. Set explicitly in droplet `.env` (not removed) to avoid the stale-image-default trap. |
 | May 18 | Removed broken auto-deposit detection (was creating phantom deposits, corrupting P&L) |
