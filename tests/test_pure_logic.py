@@ -191,29 +191,59 @@ class TestDynamicStop:
 
 
 class TestMaxPositionSize:
-    """Capital allocation math."""
+    """Equity-scaled position sizing (env: TRADING_CAPITAL_ALLOCATION=0.60,
+    TARGET_POSITIONS=10 base; defaults REF=$1000, +6/10×, MIN/MAX=5/25,
+    HARD_CAP=25%, MIN_DOLLARS=$10). _max_position_size = equal-weight slice of
+    trading capital (account × 0.60), NOT a hardcoded clamp."""
 
-    def test_small_account_floor(self):
-        """$200 account → $50 floor (min position)."""
-        size = _max_position_size(200)
-        assert size == 50
+    def test_below_reference_uses_base_book(self):
+        """$200 acct → tc=$120, book floored at base 10 → $120/10 = $12/pos."""
+        assert round(_max_position_size(200), 2) == 12.0
 
-    def test_medium_account_scales_up(self):
-        """$1000 → $60 (above $50 floor)."""
-        size = _max_position_size(1000)
-        assert size == 60
+    def test_medium_account_equal_weight(self):
+        """$1000 acct → tc=$600, book=10 → $600/10 = $60/pos."""
+        assert round(_max_position_size(1000), 2) == 60.0
 
-    def test_large_account_hits_cap(self):
-        """$50000 → $2000 cap."""
-        size = _max_position_size(50000)
-        assert size == 2000
+    def test_large_account_scales_book_no_2000_clip(self):
+        """$50k acct → tc=$30k, book=round(10+6·log10(30))=19 → $30000/19 ≈ $1578.95.
+        Regression: the old hardcoded $2000 clamp is gone — size is the equal-weight
+        slice, driven by the scaled book size."""
+        assert round(_max_position_size(50000), 2) == round(30000 / 19, 2)
 
-    def test_zero_account(self):
-        """$0 → $50 floor."""
-        size = _max_position_size(0)
-        assert size == 50
+    def test_million_dollar_account_not_clipped(self):
+        """$2M acct → tc=$1.2M, book clamped at MAX 25 → $1.2M/25 = $48,000/pos.
+        Proves a large account deploys real size instead of the old $2k ceiling."""
+        assert _max_position_size(2_000_000) == 48_000.0
 
-    def test_negative_account(self):
-        """Negative → $50 floor."""
-        size = _max_position_size(-100)
-        assert size == 50
+    def test_zero_account_min_dollars(self):
+        """$0 → POSITION_MIN_DOLLARS floor ($10)."""
+        assert _max_position_size(0) == 10
+
+    def test_negative_account_min_dollars(self):
+        """Negative → POSITION_MIN_DOLLARS floor ($10)."""
+        assert _max_position_size(-100) == 10
+
+
+class TestEquityScaledFormulas:
+    """Config.target_positions / max_trades_per_day scale with capital."""
+
+    def test_book_grows_with_equity(self):
+        assert Config.target_positions(1000) == 10        # base at reference
+        assert Config.target_positions(10_000) == 16      # +6 per 10×
+        assert Config.target_positions(100_000) == 22
+
+    def test_book_clamped_at_max(self):
+        assert Config.target_positions(1_000_000_000) == Config.TARGET_POSITIONS_MAX
+
+    def test_book_floored_below_reference(self):
+        assert Config.target_positions(50) == Config.TARGET_POSITIONS  # base, not lower
+
+    def test_trades_per_day_scales_without_override(self):
+        """No env pin → 2× the scaled book size."""
+        with patch.object(Config, "_RISK_MAX_TRADES_OVERRIDE", None):
+            assert Config.max_trades_per_day(1000) == 20      # 2 × 10
+            assert Config.max_trades_per_day(100_000) == 44   # 2 × 22
+
+    def test_explicit_pin_overrides_scaling(self):
+        with patch.object(Config, "_RISK_MAX_TRADES_OVERRIDE", "12"):
+            assert Config.max_trades_per_day(1_000_000) == 12

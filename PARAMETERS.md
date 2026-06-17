@@ -14,6 +14,22 @@
 | `RISK_MIN_HOLDING_DAYS` | **1** | Min days before a *voluntary* (LLM) sell is allowed; hard stops & expiry exempt |
 | `RISK_MIN_CONFIDENCE` | **0.6** | Minimum LLM confidence to accept a signal |
 
+### Equity-Scaled Sizing (`trader/config.py` — formulas, not fixed values)
+
+Book size and per-position $ are **functions of trading capital**, not constants — a fixed count and a hardcoded $ cap break as equity grows (the old `max(50, min(slice, 2000))` clamp would deploy ~$16k of a $1M account). Call sites use `Config.target_positions()` / `max_position_dollars()` / `max_trades_per_day()`.
+
+| Parameter | Current | Description |
+|---|---|---|
+| `TARGET_POSITIONS` | **8** | Base book size **at the reference capital** (the formula's anchor, not a fixed count) |
+| `TARGET_POSITIONS_REF_CAPITAL` | **$1000** | Capital at which the live book = `TARGET_POSITIONS` |
+| `TARGET_POSITIONS_PER_10X` | **6** | Names added per 10× capital: `book = TARGET_POSITIONS + 6·log10(cap/ref)` |
+| `TARGET_POSITIONS_MIN` / `_MAX` | **5 / 25** | Book clamp (`_MAX` < ranked-watchlist depth of 30) |
+| `POSITION_HARD_CAP_PCT` | **0.25** | No single position > this fraction of trading capital (replaces the $2000 ceiling) |
+| `POSITION_MIN_DOLLARS` | **$10** | Per-position floor so tiny accounts can still place an order (replaces the $50 floor) |
+| `RISK_MAX_TRADES_MULT` | **2** | Daily trade cap = this × live book size (unless `RISK_MAX_TRADES_PER_DAY` is pinned) |
+
+Resulting book / per-position / trades-day: **$1k → 8 / $125 / 16**, **$10k → 14 / $714 / 28**, **$100k → 20 / $5k / 40**, **$1M → 25 / $40k / 50**.
+
 ### Allocation (`trader/__main__.py`)
 
 | Parameter | Current | Description |
@@ -140,6 +156,7 @@
 
 | Date | Change |
 |---|---|
+| Jun 17 | **Equity-scaled sizing** — replaced the hardcoded `max(50, min(slice, 2000))` position clamp (copy-pasted in 5 files, deployed ~$16k of a $1M account) with `Config.max_position_dollars()` / `target_positions()` / `max_trades_per_day()`. Book size, per-position $, and daily trade cap now grow with capital. `TARGET_POSITIONS` is now the base at `TARGET_POSITIONS_REF_CAPITAL`. At current equity behavior is unchanged. Tests updated (26 pass). Requires droplet **rebuild** (code change) + removing the `RISK_MAX_TRADES_PER_DAY` pin to let it scale. |
 | May 18 | Removed broken auto-deposit detection (was creating phantom deposits, corrupting P&L) |
 | May 18 | Options no-stack: bot skips symbols already held in open positions |
 | May 18 | MACD: 12/26/9 → **8/21/5** on minute bars (shorter intraday trend capture) |

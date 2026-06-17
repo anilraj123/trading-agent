@@ -73,8 +73,9 @@ class RiskManager:
     def can_trade(self, portfolio_value: float, unrealized_pnl: float = 0.0) -> tuple[bool, str]:
         self.reset_if_new_day()
 
-        if self.daily_trades >= Config.RISK_MAX_TRADES_PER_DAY:
-            return False, f"Daily trade limit reached ({self.daily_trades}/{Config.RISK_MAX_TRADES_PER_DAY})"
+        max_trades = Config.max_trades_per_day(portfolio_value * Config.TRADING_CAPITAL_ALLOCATION)
+        if self.daily_trades >= max_trades:
+            return False, f"Daily trade limit reached ({self.daily_trades}/{max_trades})"
 
         total_daily_pnl = self.daily_pnl + unrealized_pnl
         daily_loss_limit = Config.RISK_DAILY_LOSS_LIMIT / 100 * portfolio_value
@@ -109,8 +110,7 @@ class RiskManager:
                 return False, "Invalid buy quantity"
 
             position_value = quantity * current_price
-            per_trade_size = trading_capital / Config.TARGET_POSITIONS
-            max_position = max(50, min(per_trade_size, 2000))
+            max_position = Config.max_position_dollars(trading_capital)
             if position_value > max_position:
                 max_shares = max_position / current_price
                 return False, f"Position too large. Max ${max_position:.0f}, need ${position_value:.2f}. Max shares: {max_shares:.2f}"
@@ -244,12 +244,13 @@ class RiskManager:
     def get_status(self, portfolio_value: float = None) -> dict:
         pv = portfolio_value if portfolio_value else Config.SIMULATED_ACCOUNT_SIZE
         daily_loss_limit = Config.RISK_DAILY_LOSS_LIMIT / 100 * pv
+        max_trades = Config.max_trades_per_day(pv * Config.TRADING_CAPITAL_ALLOCATION)
         return {
             "daily_trades": self.daily_trades,
             "daily_pnl": self.daily_pnl,
-            "max_trades": Config.RISK_MAX_TRADES_PER_DAY,
+            "max_trades": max_trades,
             "daily_loss_limit": round(daily_loss_limit, 2),
-            "remaining_capacity": Config.RISK_MAX_TRADES_PER_DAY - self.daily_trades,
+            "remaining_capacity": max_trades - self.daily_trades,
             "distance_to_loss_limit": round(self.daily_pnl - daily_loss_limit, 2),
             "open_positions": len(self.positions),
             "stop_loss_pct": Config.TA_STOP_LOSS_PCT

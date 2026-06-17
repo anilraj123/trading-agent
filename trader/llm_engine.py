@@ -48,9 +48,7 @@ OPTIONS_SIGNAL_TOOL = {
 
 
 def _max_position_size(account_value: float) -> float:
-    trading_capital = account_value * Config.TRADING_CAPITAL_ALLOCATION
-    per_trade_size = trading_capital / Config.TARGET_POSITIONS
-    return max(50, min(per_trade_size, 2000))
+    return Config.max_position_dollars(account_value * Config.TRADING_CAPITAL_ALLOCATION)
 
 
 def _build_system_prompt(account_value: float = None) -> str:
@@ -58,6 +56,9 @@ def _build_system_prompt(account_value: float = None) -> str:
         account_value = Config.SIMULATED_ACCOUNT_SIZE
     stop_pct = abs(Config.TA_STOP_LOSS_PCT) * 100
     daily_loss_amt = abs(Config.RISK_DAILY_LOSS_LIMIT / 100 * account_value)
+    trading_capital = account_value * Config.TRADING_CAPITAL_ALLOCATION
+    target_pos = Config.target_positions(trading_capital)
+    max_trades = Config.max_trades_per_day(trading_capital)
     max_pos = _max_position_size(account_value)
 
     return f"""You are an expert AI stock trading assistant. You analyze market data using TECHNICAL ANALYSIS and make precise trading decisions.
@@ -84,9 +85,9 @@ SELL SIGNALS (Score >= {Config.TA_MIN_SELL_SCORE}):
 - Negative momentum over last 5 bars (+{Config.TA_MOM_WEIGHT} points)
 
 RISK RULES:
-- ${account_value:.0f} account. Max ${max_pos:.0f} per trade ({100 / Config.TARGET_POSITIONS:.0f}% per position across {Config.TARGET_POSITIONS} target positions).
+- ${account_value:.0f} account. Max ${max_pos:.0f} per trade ({100 / target_pos:.0f}% per position across {target_pos} target positions).
 - Stop loss at {stop_pct:.0f}% from entry.
-- Max {Config.RISK_MAX_TRADES_PER_DAY} trades per day.
+- Max {max_trades} trades per day.
 - Daily loss limit: {abs(Config.RISK_DAILY_LOSS_LIMIT):.1f}% of account (${daily_loss_amt:.2f}).
 - If uncertain, HOLD.
 
@@ -256,6 +257,7 @@ class LLMEngine:
         stock_positions = [p for p in portfolio.get('positions', []) if len(p.get('symbol', '')) <= 10]
         if max_pos is None:
             max_pos = _max_position_size(account_value or Config.SIMULATED_ACCOUNT_SIZE)
+        target_pos = Config.target_positions((account_value or Config.SIMULATED_ACCOUNT_SIZE) * Config.TRADING_CAPITAL_ALLOCATION)
 
         return f"""Portfolio:
 - Total Value: ${portfolio['total_value']:.2f} | Cash: ${portfolio['cash']:.2f}
@@ -282,7 +284,7 @@ DECISION RULES:
    b. unrealized P&L <= -2.5% (approaching stop), OR
    c. DTE-based rule applies (options only)
 3. Use stop loss at {Config.TA_STOP_LOSS_PCT:.0%} from entry price
-4. Position size max ${max_pos:.0f} per trade (target {Config.TARGET_POSITIONS} concurrent positions)
+4. Position size max ${max_pos:.0f} per trade (target {target_pos} concurrent positions)
 5. All indicators are on daily bars — MACD(8/21/5) captures ~3-week trends, momentum(5) = 5-day % change
 6. Only trade stocks with clear momentum signals (no mean-reversion plays)
 7. Evaluate each top candidate — consider news catalysts alongside TA signals
