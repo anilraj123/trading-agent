@@ -19,6 +19,7 @@
 | Parameter | Current | Description |
 |---|---|---|
 | `trading_capital_allocation` | **0.60** (60%) | Account fraction for stock trading (remainder to options) |
+| `TARGET_POSITIONS` | **8** | Target concurrent positions; per-position size = trading_capital ÷ this. Drives `RISK_MAX_TRADES_PER_DAY` default (2×). |
 | `MIN_NOTIONAL` | **$10** | Minimum order notional value |
 | `status_interval` | **4** cycles | Heartbeat notification every N cycles |
 | `unexpected_change > 5.0` | **$5** | Deposit detection threshold (ignore smaller equity fluctuations) |
@@ -140,6 +141,7 @@
 
 | Date | Change |
 |---|---|
+| Jun 17 | `TARGET_POSITIONS`: 6 → **8** — spread the full 100%-stock allocation across more names so less cash sits idle when signals qualify. Per-position size drops ~$190 → ~$169 on a $1.1k account. Set via droplet `.env` override. (`RISK_MAX_TRADES_PER_DAY` left pinned at 12; bot does ~3/day so not binding, but note 8 positions would ideally want 16.) |
 | May 18 | Removed broken auto-deposit detection (was creating phantom deposits, corrupting P&L) |
 | May 18 | Options no-stack: bot skips symbols already held in open positions |
 | May 18 | MACD: 12/26/9 → **8/21/5** on minute bars (shorter intraday trend capture) |
