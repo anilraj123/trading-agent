@@ -140,6 +140,7 @@
 
 | Date | Change |
 |---|---|
+| Jun 17 | `LLM_MODEL`: `claude-sonnet-4-20250514` → **`claude-sonnet-4-6`** — old Sonnet 4 was retired by Anthropic (every cycle 404'd → no LLM trades since ~Jun 16). Same Sonnet tier, same cost profile. Also hotfixed on droplet `.env` + recreated container. |
 | May 18 | Removed broken auto-deposit detection (was creating phantom deposits, corrupting P&L) |
 | May 18 | Options no-stack: bot skips symbols already held in open positions |
 | May 18 | MACD: 12/26/9 → **8/21/5** on minute bars (shorter intraday trend capture) |

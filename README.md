@@ -24,7 +24,7 @@ Autonomous stock trading bot powered by LLM, supervised via risk guardrails.
 - Go to [anthropic.com](https://console.anthropic.com)
 - Sign up, add credits
 - Create API key
-- Model: `claude-sonnet-4-20250514` (good balance of cost and quality)
+- Model: `claude-sonnet-4-6` (good balance of cost and quality)
 
 ### 3. Install & Configure
 
@@ -72,7 +72,7 @@ ALPACA_BASE_URL=https://paper-api.alpaca.markets
 # LLM
 LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
-LLM_MODEL=claude-sonnet-4-20250514
+LLM_MODEL=claude-sonnet-4-6
 
 # Risk settings
 RISK_MAX_POSITION_PCT=0.10
