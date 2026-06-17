@@ -89,6 +89,17 @@ class Config:
     TA_VOL_BOOST = float(os.getenv("TA_VOL_BOOST", "1.2"))
     TA_MIN_BUY_SCORE = float(os.getenv("TA_MIN_BUY_SCORE", "1.0"))
     TA_MIN_SELL_SCORE = float(os.getenv("TA_MIN_SELL_SCORE", "1.0"))
+    # Cost control: skip the LLM scoring call on "idle" cycles — cycles where no
+    # buy candidate clears the buy bar AND no held position needs a sell review.
+    # On those cycles the LLM only ever returns HOLD, so skipping is behaviour-
+    # neutral: deterministic stop-losses and holding-period exits run every cycle,
+    # earlier in run_cycle and independent of this gate. See needs_llm_review() in
+    # llm_engine. Set to false to force an LLM call every cycle.
+    LLM_SKIP_IDLE_CYCLES = os.getenv("LLM_SKIP_IDLE_CYCLES", "true").lower() == "true"
+    # P&L% at/below which a held position is "approaching its stop" and warrants
+    # an LLM sell review even on an otherwise-idle cycle. Mirrors the discretionary
+    # sell rule stated in the LLM prompt — both read this value, so they stay in sync.
+    LLM_SELL_REVIEW_PNL_PCT = float(os.getenv("LLM_SELL_REVIEW_PNL_PCT", "-2.5"))
     # TA_STOP_LOSS_PCT is now an alias of RISK_STOP_LOSS_PCT. Kept for code that
     # historically read Config.TA_STOP_LOSS_PCT (LLM prompt, panels, etc.). Always
     # mirrors RISK_STOP_LOSS_PCT so changing one place is enough.
