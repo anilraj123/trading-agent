@@ -11,7 +11,7 @@ class Config:
 
     LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")
     LLM_API_KEY = os.getenv("LLM_API_KEY")
-    LLM_MODEL = os.getenv("LLM_MODEL", "claude-sonnet-4-20250514")
+    LLM_MODEL = os.getenv("LLM_MODEL", "claude-sonnet-4-6")
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
     # 1.0 = equity bot uses the full trading slice (options bot paused 2026-06-09).
