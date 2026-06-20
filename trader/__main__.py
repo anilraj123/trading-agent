@@ -460,7 +460,7 @@ class TradingBot:
                 except Exception as e:
                     logger.debug("TA failed for %s: %s", symbol, e)
 
-        # Rank by momentum buy_score — shrink watchlist to 30 best candidates
+        # Rank by momentum buy_score — shrink watchlist to the top WATCHLIST_DEPTH candidates
         scored = [(s, d.get("score", {}).get("buy_score", 0)) for s, d in technical_analysis.items() if d]
         scored.sort(key=lambda x: -x[1])
 
@@ -478,7 +478,7 @@ class TradingBot:
                 disqualified.add(s)
         scored = [(s, bs) for s, bs in scored if s not in disqualified]
 
-        self.watchlist = [s for s, _ in scored[:30]]
+        self.watchlist = [s for s, _ in scored[:Config.WATCHLIST_DEPTH]]
         logger.info(f"Ranked watchlist: {len(self.watchlist)} momentum names (top by buy_score, {len(disqualified)} disqualified)")
 
         # Identify top 5 candidates that meet the buy threshold for LLM focus
