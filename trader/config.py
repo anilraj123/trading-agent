@@ -89,6 +89,16 @@ class Config:
     TA_VOL_BOOST = float(os.getenv("TA_VOL_BOOST", "1.2"))
     TA_MIN_BUY_SCORE = float(os.getenv("TA_MIN_BUY_SCORE", "1.0"))
     TA_MIN_SELL_SCORE = float(os.getenv("TA_MIN_SELL_SCORE", "1.0"))
+    # Entry over-extension guards. The momentum buy_score has no upside ceiling,
+    # so a name already up double-digits, sitting above its upper Bollinger band,
+    # at a high RSI still scores full marks — i.e. the bot chases tops, then risk
+    # exits cut them at small losses (the 6W/15L pattern, week of 2026-06-09).
+    # Each guard below zeroes the BUY score (sell signals untouched) when a name
+    # is too extended to open a new long. Set RSI/BB high or DAY_GAIN large to
+    # disable an individual guard. See score_signals() and PARAMETERS.md.
+    TA_RSI_BUY_MAX = float(os.getenv("TA_RSI_BUY_MAX", "72"))        # no new longs at/above this RSI (was a flat 80 hard cutoff)
+    TA_BB_BUY_MAX = float(os.getenv("TA_BB_BUY_MAX", "1.0"))         # no buys at/above the upper Bollinger band (bb position)
+    TA_MAX_DAY_GAIN_PCT = float(os.getenv("TA_MAX_DAY_GAIN_PCT", "10.0"))  # no chasing a name already up this % on the day
     # Cost control: skip the LLM scoring call on "idle" cycles — cycles where no
     # buy candidate clears the buy bar AND no held position needs a sell review.
     # On those cycles the LLM only ever returns HOLD, so skipping is behaviour-

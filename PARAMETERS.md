@@ -63,6 +63,9 @@ Resulting book / per-position / trades-day: **$1k → 8 / $125 / 16**, **$10k �
 | `TA_VOL_BOOST` | **1.2x** | Score multiplier when volume exceeds threshold |
 | `TA_MIN_BUY_SCORE` | **0.65** | Minimum composite score to place a buy order |
 | `TA_MIN_SELL_SCORE` | **0.60** | Minimum composite score to place a sell order |
+| `TA_RSI_BUY_MAX` | **72** | Entry guard: RSI above this forces `buy_score=0` (no new longs in overbought names). Replaces the old flat RSI>80 cutoff. |
+| `TA_BB_BUY_MAX` | **1.0** | Entry guard: Bollinger position above this (i.e. price above the upper band) forces `buy_score=0`. |
+| `TA_MAX_DAY_GAIN_PCT` | **10.0** | Entry guard: a name already up more than this % on the day forces `buy_score=0` (no chasing spikes). |
 | `TA_STOP_LOSS_PCT` | alias | Deprecated env-var; if set, used as fallback for `RISK_STOP_LOSS_PCT`. Code now reads `RISK_STOP_LOSS_PCT` everywhere. |
 
 | Indicator | Periods | Lookback |
@@ -158,6 +161,7 @@ Resulting book / per-position / trades-day: **$1k → 8 / $125 / 16**, **$10k �
 
 | Date | Change |
 |---|---|
+| Jun 19 | **Entry over-extension guards** (`TA_RSI_BUY_MAX=72`, `TA_BB_BUY_MAX=1.0`, `TA_MAX_DAY_GAIN_PCT=10`) — `buy_score` had no upside ceiling, so the bot chased momentum tops (bought names already up 7–13% on the day, at/above the upper band, RSI 65–74) then risk-exited at small losses → 6W/15L the week of Jun 9. These guards zero the *buy* score (sell signals untouched) when a name is too extended to open a new long. Replaces the old flat RSI>80 cutoff. Replaying last week: blocks CPRI/W/DHR/TJX/LLY, still allows ZTS/HD/MMM. Requires droplet **rebuild** (code change). Tests added (39 pass). |
 | Jun 17 | **Skip-idle-LLM-cycles** (`LLM_SKIP_IDLE_CYCLES=true`) — the LLM scoring call now runs only when a buy candidate clears the bar or a held position needs a sell review (`needs_llm_review()`); otherwise it would only return HOLD. Cuts ~half the API calls with no behaviour change — deterministic stop-losses and expiry exits run every cycle, before/independent of the LLM. `LLM_SELL_REVIEW_PNL_PCT=-2.5` is the near-stop trigger, shared with the prompt. |
 | Jun 17 | `LLM_MODEL`: `claude-sonnet-4-20250514` → **`claude-sonnet-4-6`** — old Sonnet 4 was retired by Anthropic (every cycle 404'd → no LLM trades since ~Jun 16). Same Sonnet tier, same cost profile. Also hotfixed on droplet `.env` + recreated container. |
 | Jun 17 | `TARGET_POSITIONS`: 6 → **8** — spread the full 100%-stock allocation across more names so less cash sits idle when signals qualify. Per-position size drops ~$190 → ~$169 on a $1.1k account. Set via droplet `.env` override. |
