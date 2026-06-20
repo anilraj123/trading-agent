@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Two independent LLM-driven trading bots running side-by-side against an Alpaca paper account, each with its own capital allocation slice:
+Two independent LLM-driven trading bots running side-by-side against an Alpaca **live (real-money)** account, each with its own capital allocation slice:
+
+> ⚠️ **This is a real-money account** (`ALPACA_BASE_URL=https://api.alpaca.markets`), not paper. All P&L is real dollars — treat sizing, deployment, and any "just restart it" action accordingly.
 
 - `trader/` — equity day-trader, 60% of account, 15-min cycle, RSI/MACD/BB technical scoring
 - `options_bot/` — long calls/puts trader, 40% of account, 60-min signal cycle + 15-min position management
@@ -34,7 +36,7 @@ Tests: none. The "backtest_*.py" scripts at the repo root are exploratory/resear
 
 ## Architecture notes that aren't obvious from one file
 
-**Capital accounting decouples Alpaca equity from trading capital.** `TradingBot.__init__` reads `deposits.csv` (manually maintained list of cash injections) and subtracts the sum from current equity to compute `self.account_value`. Then `trading_capital = account_value * trading_capital_allocation` (currently 0.60). All risk-manager position sizing uses this derived `trading_capital`, NOT raw Alpaca equity. The options bot does the parallel calculation with `ALLOCATED_PCT = 0.40`. When you change allocations make sure both bots' percentages still sum to ≤ 1.0 and that you understand the deposit-tracking is fragile (the old auto-detect was removed for creating phantom deposits — see `PARAMETERS.md` changelog).
+**Capital accounting decouples Alpaca equity from trading capital.** `TradingBot.__init__` reads `deposits.csv` (manually maintained list of cash injections) and subtracts the sum from current equity to compute `self.account_value`. Then `trading_capital = account_value * trading_capital_allocation` (currently 0.60). All risk-manager position sizing uses this derived `trading_capital`, NOT raw Alpaca equity. The options bot does the parallel calculation with `ALLOCATED_PCT = 0.40`. When you change allocations make sure both bots' percentages still sum to ≤ 1.0 and that you understand the deposit-tracking is fragile (the old auto-detect was removed for creating phantom deposits — see `PARAMETERS.md` changelog). **Cost basis: the initial deposit was $1,350** (recorded in `initial_seed.txt` under the data volume), so lifetime P&L = current equity − $1,350. `deposits.csv` is currently empty (no injections beyond the seed), which makes `account_value == equity`.
 
 **TA runs on daily bars.** `TechnicalAnalysis.compute_all` is fed `alpaca.get_bars_batch` with `days=250, timeframe=1Day`. RSI(14) is 14 days, MACD(8/21/5) is a ~3-week trend, momentum(5) is a 5-day % change. Daily bars are cached once per trading day; the forming (current-day) bar is excluded from signal computation. The LLM prompt in `trader/llm_engine.py` describes the daily semantics. The options bot independently uses 5-min bars (via the default `timeframe` param) for its intraday TA pre-filter — the two timeframes coexist through the shared `AlpacaClient.get_bars`/`get_bars_batch` signature, which defaults to 5Min when no `timeframe` is passed.
 
