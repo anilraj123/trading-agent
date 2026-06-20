@@ -64,7 +64,7 @@ class StockDiscovery:
                 setattr(self, attr, [])
 
         stocks = {s for s in stocks if s not in Config.BLACKLIST}
-        final_list = list(stocks)[:150]  # Increased from 100 to 150 for better diversity in 50-stock watchlist
+        final_list = list(stocks)[:Config.STOCK_DISCOVERY_COUNT]  # cap the scanned universe (default 250) — more candidates for the ranked watchlist
         self.discovered_stocks = final_list
 
         from datetime import datetime

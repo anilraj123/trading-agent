@@ -24,7 +24,7 @@ class Config:
     # $1M). Call sites should use Config.target_positions(trading_capital), NOT this
     # raw attribute, for anything equity-sensitive. Kept as an attribute for the
     # baseline/display and as the formula's anchor.
-    TARGET_POSITIONS = int(os.getenv("TARGET_POSITIONS", "8"))
+    TARGET_POSITIONS = int(os.getenv("TARGET_POSITIONS", "12"))
     RISK_DAILY_LOSS_LIMIT = float(os.getenv("RISK_DAILY_LOSS_LIMIT", "-5.00"))
     # Stop-loss fraction (negative). Falls back to legacy TA_STOP_LOSS_PCT for
     # backward compatibility with existing .env files; RISK_STOP_LOSS_PCT wins if set.
@@ -52,7 +52,7 @@ class Config:
     TARGET_POSITIONS_REF_CAPITAL = float(os.getenv("TARGET_POSITIONS_REF_CAPITAL", "1000"))  # equity where book = TARGET_POSITIONS
     TARGET_POSITIONS_PER_10X = float(os.getenv("TARGET_POSITIONS_PER_10X", "6"))             # +N names per 10× capital
     TARGET_POSITIONS_MIN = int(os.getenv("TARGET_POSITIONS_MIN", "5"))
-    TARGET_POSITIONS_MAX = int(os.getenv("TARGET_POSITIONS_MAX", "25"))                       # < ranked-watchlist depth (30)
+    TARGET_POSITIONS_MAX = int(os.getenv("TARGET_POSITIONS_MAX", "25"))                       # keep <= WATCHLIST_DEPTH so the book can always fill
     POSITION_HARD_CAP_PCT = float(os.getenv("POSITION_HARD_CAP_PCT", "0.25"))                 # no single position > this fraction of capital
     POSITION_MIN_DOLLARS = float(os.getenv("POSITION_MIN_DOLLARS", "10"))                     # floor so tiny accounts can still place an order
     RISK_MAX_HOLDING_DAYS = int(os.getenv("RISK_MAX_HOLDING_DAYS", "3"))
@@ -67,6 +67,15 @@ class Config:
 
     TRADING_INTERVAL_MINUTES = int(os.getenv("TRADING_INTERVAL_MINUTES", "15"))
     WATCHLIST = [s.strip() for s in os.getenv("WATCHLIST", "AAPL,MSFT,TSLA,SPY,QQQ").split(",")]
+    # Discovery/diversification funnel. The equity bot scans STOCK_DISCOVERY_COUNT
+    # names (fallback universe + live trending), ranks them by buy_score, then keeps
+    # the top WATCHLIST_DEPTH as buy candidates. Both were hardcoded (150 / 30);
+    # widened so more names clear the buy bar each cycle, letting the bot spread idle
+    # cash across more positions (see TARGET_POSITIONS). WATCHLIST_DEPTH should stay
+    # >= TARGET_POSITIONS_MAX so the book can always fill. Higher values = a bit more
+    # data/compute per cycle and a slightly larger LLM prompt.
+    STOCK_DISCOVERY_COUNT = int(os.getenv("STOCK_DISCOVERY_COUNT", "250"))
+    WATCHLIST_DEPTH = int(os.getenv("WATCHLIST_DEPTH", "50"))
     BLACKLIST = [s.strip().upper() for s in os.getenv("BLACKLIST", "").split(",") if s.strip()]
     CRYPTO_SUFFIXES = [s.upper() for s in os.getenv("CRYPTO_SUFFIXES", "USD,USDT,USDC,BTC").split(",") if s.strip()]
     SIMULATED_ACCOUNT_SIZE = float(os.getenv("SIMULATED_ACCOUNT_SIZE", "200"))

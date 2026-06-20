@@ -22,10 +22,10 @@ Book size and per-position $ are **functions of trading capital**, not constants
 
 | Parameter | Current | Description |
 |---|---|---|
-| `TARGET_POSITIONS` | **8** | Base book size **at the reference capital** (the formula's anchor, not a fixed count) |
+| `TARGET_POSITIONS` | **12** | Base book size **at the reference capital** (the formula's anchor, not a fixed count) |
 | `TARGET_POSITIONS_REF_CAPITAL` | **$1000** | Capital at which the live book = `TARGET_POSITIONS` |
 | `TARGET_POSITIONS_PER_10X` | **6** | Names added per 10× capital: `book = TARGET_POSITIONS + 6·log10(cap/ref)` |
-| `TARGET_POSITIONS_MIN` / `_MAX` | **5 / 25** | Book clamp (`_MAX` < ranked-watchlist depth of 30) |
+| `TARGET_POSITIONS_MIN` / `_MAX` | **5 / 25** | Book clamp (keep `_MAX` ≤ `WATCHLIST_DEPTH` so the book can fill) |
 | `POSITION_HARD_CAP_PCT` | **0.25** | No single position > this fraction of trading capital (replaces the $2000 ceiling) |
 | `POSITION_MIN_DOLLARS` | **$10** | Per-position floor so tiny accounts can still place an order (replaces the $50 floor) |
 | `RISK_MAX_TRADES_MULT` | **2** | Daily trade cap = this × live book size (unless `RISK_MAX_TRADES_PER_DAY` is pinned) |
@@ -83,8 +83,9 @@ Resulting book / per-position / trades-day: **$1k → 8 / $125 / 16**, **$10k �
 
 | Parameter | Current | Description |
 |---|---|---|
-| `UNIVERSE_100` | **100** tickers | Core stock pool (hardcoded list) |
-| Final pool size | **150** | Max stocks from discovery + universe combined |
+| `UNIVERSE_100` | **100** tickers | Core stock pool (hardcoded list, always seeded into discovery) |
+| `STOCK_DISCOVERY_COUNT` | **250** | Max stocks scanned per cycle (universe + live trending), was a hardcoded 150 |
+| `WATCHLIST_DEPTH` | **50** | Top-N by buy_score kept as buy candidates after ranking (`trader/__main__.py`), was a hardcoded 30 |
 | Per-source scrape limit | **50** | Max stocks taken per Yahoo / Marketwatch source |
 | HTTP timeout | **10s** | Web scraping timeout |
 | Symbol length filter | **≤ 5** | Max ticker symbol length accepted from scrapers |
@@ -161,6 +162,7 @@ Resulting book / per-position / trades-day: **$1k → 8 / $125 / 16**, **$10k �
 
 | Date | Change |
 |---|---|
+| Jun 19 | **Wider diversification funnel** — to use idle cash (was ~45% uninvested) by holding *more* names rather than lowering the quality bar. `TARGET_POSITIONS` 8 → **12** (base book; ~$95/position at $1.1k, full-deploy ≈ $1,142, daily trade cap auto-scales to 24). Funnel widened so enough names clear the bar to fill the bigger book: `STOCK_DISCOVERY_COUNT` (new) **250** (was hardcoded 150) and `WATCHLIST_DEPTH` (new) **50** (was hardcoded 30). Quality bar (`TA_MIN_BUY_SCORE`) and the new entry guards are unchanged, so diversification grows without re-introducing top-chasing. Needs droplet **rebuild** + droplet `.env` `TARGET_POSITIONS` 8→12. Tests 39 pass. |
 | Jun 19 | **Entry over-extension guards** (`TA_RSI_BUY_MAX=72`, `TA_BB_BUY_MAX=1.0`, `TA_MAX_DAY_GAIN_PCT=10`) — `buy_score` had no upside ceiling, so the bot chased momentum tops (bought names already up 7–13% on the day, at/above the upper band, RSI 65–74) then risk-exited at small losses → 6W/15L the week of Jun 9. These guards zero the *buy* score (sell signals untouched) when a name is too extended to open a new long. Replaces the old flat RSI>80 cutoff. Replaying last week: blocks CPRI/W/DHR/TJX/LLY, still allows ZTS/HD/MMM. Requires droplet **rebuild** (code change). Tests added (39 pass). |
 | Jun 17 | **Skip-idle-LLM-cycles** (`LLM_SKIP_IDLE_CYCLES=true`) — the LLM scoring call now runs only when a buy candidate clears the bar or a held position needs a sell review (`needs_llm_review()`); otherwise it would only return HOLD. Cuts ~half the API calls with no behaviour change — deterministic stop-losses and expiry exits run every cycle, before/independent of the LLM. `LLM_SELL_REVIEW_PNL_PCT=-2.5` is the near-stop trigger, shared with the prompt. |
 | Jun 17 | `LLM_MODEL`: `claude-sonnet-4-20250514` → **`claude-sonnet-4-6`** — old Sonnet 4 was retired by Anthropic (every cycle 404'd → no LLM trades since ~Jun 16). Same Sonnet tier, same cost profile. Also hotfixed on droplet `.env` + recreated container. |
