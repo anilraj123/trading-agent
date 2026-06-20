@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Two independent LLM-driven trading bots running side-by-side against an Alpaca paper account, each with its own capital allocation slice:
+Two independent LLM-driven trading bots running side-by-side against an Alpaca **live (real-money)** account, each with its own capital allocation slice:
+
+> ⚠️ **This is a real-money account** (`ALPACA_BASE_URL=https://api.alpaca.markets`), not paper. All P&L is real dollars — treat sizing, deployment, and any "just restart it" action accordingly.
 
 - `trader/` — equity day-trader, 60% of account, 15-min cycle, RSI/MACD/BB technical scoring
 - `options_bot/` — long calls/puts trader, 40% of account, 60-min signal cycle + 15-min position management
