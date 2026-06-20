@@ -153,9 +153,19 @@ class TechnicalAnalysis:
                       components["bb_sell"] + components["trend_sell"] +
                       components["momentum_sell"]) * vol_boost
 
-        # Hard disqualifiers: overbought or illiquid
-        if rsi > 80:
+        # Hard disqualifiers (buy-side only — sell_score is left intact).
+        # Over-extension: don't open a new long in a name that's already stretched
+        # (high RSI, trading above its upper Bollinger band, or already spiked on
+        # the day). This is what stops the bot chasing momentum tops.
+        day_gain = ta_data.get("price_change_pct", 0.0)
+        overextended = (
+            rsi > Config.TA_RSI_BUY_MAX
+            or bb_pos > Config.TA_BB_BUY_MAX
+            or day_gain > Config.TA_MAX_DAY_GAIN_PCT
+        )
+        if overextended:
             buy_score = 0.0
+        # Illiquidity
         curr_vol = vol.get("current", 0) if isinstance(vol, dict) else 0
         if curr_vol < 1000 or vol_ratio < 0.1:
             buy_score = 0.0
@@ -165,6 +175,7 @@ class TechnicalAnalysis:
             "sell_score": float(round(sell_score, 2)),
             "meets_buy_threshold": bool(buy_score >= Config.TA_MIN_BUY_SCORE),
             "meets_sell_threshold": bool(sell_score >= Config.TA_MIN_SELL_SCORE),
+            "overextended": bool(overextended),
             "components": {k: float(round(v, 3)) for k, v in components.items()}
         }
 

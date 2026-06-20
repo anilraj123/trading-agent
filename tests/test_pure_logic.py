@@ -107,6 +107,70 @@ class TestScoreSignals:
         assert result["buy_score"] == 0.0
         assert result["meets_buy_threshold"] is False
 
+    def test_overextended_rsi_disqualifier(self):
+        """RSI above TA_RSI_BUY_MAX (default 72) → buy_score forced to 0."""
+        ta = {
+            "rsi_14": 74.0,
+            "macd": {"histogram": 0.5, "trend": "bullish"},
+            "bollinger_bands": {"position": 0.5},
+            "sma_10": 110.0,
+            "sma_20": 105.0,
+            "momentum_5": 4.0,
+            "volume": {"current": 50000, "ratio": 1.5},
+        }
+        result = TechnicalAnalysis.score_signals(ta)
+        assert result["buy_score"] == 0.0
+        assert result["overextended"] is True
+        assert result["meets_buy_threshold"] is False
+
+    def test_overextended_above_upper_band_disqualifier(self):
+        """Price above the upper Bollinger band (position > TA_BB_BUY_MAX=1.0) → no buy."""
+        ta = {
+            "rsi_14": 60.0,
+            "macd": {"histogram": 0.5, "trend": "bullish"},
+            "bollinger_bands": {"position": 1.05},
+            "sma_10": 110.0,
+            "sma_20": 105.0,
+            "momentum_5": 4.0,
+            "volume": {"current": 50000, "ratio": 1.5},
+        }
+        result = TechnicalAnalysis.score_signals(ta)
+        assert result["buy_score"] == 0.0
+        assert result["overextended"] is True
+
+    def test_overextended_day_gain_disqualifier(self):
+        """Name already up > TA_MAX_DAY_GAIN_PCT (default 10%) on the day → no chase."""
+        ta = {
+            "rsi_14": 60.0,
+            "price_change_pct": 13.1,
+            "macd": {"histogram": 0.5, "trend": "bullish"},
+            "bollinger_bands": {"position": 0.9},
+            "sma_10": 110.0,
+            "sma_20": 105.0,
+            "momentum_5": 4.0,
+            "volume": {"current": 50000, "ratio": 1.5},
+        }
+        result = TechnicalAnalysis.score_signals(ta)
+        assert result["buy_score"] == 0.0
+        assert result["overextended"] is True
+
+    def test_not_overextended_allows_buy(self):
+        """Strong-but-not-stretched momentum (RSI 60, mid-band, modest day gain) still buys."""
+        ta = {
+            "rsi_14": 60.0,
+            "price_change_pct": 4.0,
+            "macd": {"histogram": 0.5, "trend": "bullish"},
+            "bollinger_bands": {"position": 0.7},
+            "sma_10": 110.0,
+            "sma_20": 105.0,
+            "momentum_5": 4.0,
+            "volume": {"current": 50000, "ratio": 1.5},
+        }
+        result = TechnicalAnalysis.score_signals(ta)
+        assert result["buy_score"] >= 3.0
+        assert result["overextended"] is False
+        assert result["meets_buy_threshold"] is True
+
     def test_low_volume_disqualifier(self):
         """Volume < 1000 → buy_score forced to 0."""
         ta = {

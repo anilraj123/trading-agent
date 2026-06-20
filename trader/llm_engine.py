@@ -121,6 +121,7 @@ BUY SIGNALS (Score >= {Config.TA_MIN_BUY_SCORE}):
 - Positive momentum over last 5 bars (+{Config.TA_MOM_WEIGHT} points)
 - Volume {Config.TA_VOL_THRESHOLD}x above average → score boosted by {Config.TA_VOL_BOOST}x
 - Trend alignment (SMA 10 vs 20) (+{Config.TA_TREND_WEIGHT} points)
+- DO NOT CHASE: a name already extended (RSI > {Config.TA_RSI_BUY_MAX}, above the upper Bollinger band, or already up > {Config.TA_MAX_DAY_GAIN_PCT}% on the day) is auto-disqualified — its buy_score is forced to 0. Enter on confirmation, not after the move.
 
 SELL SIGNALS (Score >= {Config.TA_MIN_SELL_SCORE}):
 - RSI(14) above {Config.TA_RSI_OVERBOUGHT} = overextended momentum, take profits (+{Config.TA_RSI_WEIGHT} points)
