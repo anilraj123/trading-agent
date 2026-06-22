@@ -9,6 +9,7 @@ Covers:
 
 import sys
 import os
+from datetime import datetime, date
 
 test_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, test_root)
@@ -33,6 +34,7 @@ os.environ["TARGET_POSITIONS"] = "10"
 from trader.config import Config
 from trader.technical_analysis import TechnicalAnalysis
 from trader.llm_engine import _max_position_size, needs_llm_review
+from trader.risk_manager import RiskManager
 
 # Import options bot pure functions by patching heavy deps at module level
 from unittest.mock import patch
@@ -364,3 +366,51 @@ class TestNeedsLlmReview:
     def test_position_without_ta_uses_pnl_only(self):
         # held name absent from technical_analysis, healthy P&L → idle
         assert self.call(self._ta(buy=0.0), [self._pos(symbol="NOTA", mv=101, upl=1)]) is False
+
+
+class TestTradingDaysHoldingPeriod:
+    """Holding-period clock counts trading days, not calendar days
+    (trader/risk_manager.py:trading_days_between)."""
+
+    def test_friday_to_monday_is_one_trading_day(self):
+        # Fri 2026-06-19 buy is NOT 3 days old on Mon 2026-06-22 (only 1 trading day)
+        assert RiskManager.trading_days_between(date(2026, 6, 19), date(2026, 6, 22)) == 1
+
+    def test_friday_buy_expires_wednesday(self):
+        # Fri 6/19 → Wed 6/24 = Fri, Mon, Tue = 3 trading days → expires
+        assert RiskManager.trading_days_between(date(2026, 6, 19), date(2026, 6, 24)) == 3
+
+    def test_monday_to_thursday_is_three(self):
+        assert RiskManager.trading_days_between(date(2026, 6, 15), date(2026, 6, 18)) == 3
+
+    def test_same_day_is_zero(self):
+        assert RiskManager.trading_days_between(date(2026, 6, 15), date(2026, 6, 15)) == 0
+
+    def test_holiday_is_excluded(self):
+        # Mon→Mon spans 5 weekdays; one holiday mid-week drops it to 4 trading days
+        assert RiskManager.trading_days_between(
+            date(2026, 6, 15), date(2026, 6, 22), holidays=[date(2026, 6, 17)]
+        ) == 4
+
+    def test_get_expired_uses_trading_days(self):
+        # Build a risk manager with a Friday entry; "today" Monday → not expired (1 < 3)
+        from types import SimpleNamespace
+        rm = RiskManager.__new__(RiskManager)            # skip __init__/state load
+        rm.market_holidays = []
+        rm.position_entry_dates = {"AAA": datetime(2026, 6, 19, 14, 0)}
+        # Monday is only 1 trading day later → not expired
+        import trader.risk_manager as rmmod
+        class _FixedDT(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 6, 22, 15, 0)
+        orig = rmmod.datetime
+        rmmod.datetime = _FixedDT
+        try:
+            assert rm.get_expired_positions([SimpleNamespace(symbol="AAA")], max_days=3) == []
+            # …and on Wednesday (3 trading days) it expires
+            _FixedDT2 = type("_F2", (datetime,), {"now": classmethod(lambda cls, tz=None: datetime(2026, 6, 24, 15, 0))})
+            rmmod.datetime = _FixedDT2
+            assert rm.get_expired_positions([SimpleNamespace(symbol="AAA")], max_days=3) == ["AAA"]
+        finally:
+            rmmod.datetime = orig

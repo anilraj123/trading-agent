@@ -198,6 +198,13 @@ class TradingBot:
                 save_trade("trading", order["symbol"], "STOP LOSS", order["quantity"], entry_price=order["entry_price"], exit_price=order["current_price"], pnl_pct=pnl_pct, pnl_dollars=dollar_pnl)
                 self.notif.notify_stop_loss(order["symbol"], order["entry_price"], order["current_price"], pnl_pct)
 
+            # Refresh market holidays once per day so the holding-period clock counts
+            # trading days (weekends + holidays excluded), not calendar days. A 21-day
+            # lookback comfortably covers any open position vs RISK_MAX_HOLDING_DAYS.
+            _today = datetime.now().date()
+            if getattr(self, "_holidays_refreshed_on", None) != _today:
+                self.risk.market_holidays = self.alpaca.get_market_holidays(_today - timedelta(days=21), _today)
+                self._holidays_refreshed_on = _today
             expired = self.risk.get_expired_positions(positions)
             for sym in expired:
                 pos = next((p for p in positions if p.symbol == sym), None)
@@ -214,7 +221,7 @@ class TradingBot:
                 # Forced exit (holding-period expiry): don't count toward the daily voluntary-trade cap.
                 self.risk.record_trade(sym, "SELL (EXPIRY)", qty, curr_p, pnl=pnl_pct, pnl_dollars=dollar_pnl, counts_toward_daily_cap=False)
                 save_trade("trading", sym, "EXPIRY CLOSE", qty, entry_price=entry_p, exit_price=curr_p, pnl_pct=pnl_pct, pnl_dollars=dollar_pnl)
-                self.notif.send(f"Expired: sold {sym} after {Config.RISK_MAX_HOLDING_DAYS} days (PnL: {pnl_pct:+.2f}%)")
+                self.notif.send(f"Expired: sold {sym} after {Config.RISK_MAX_HOLDING_DAYS} trading days (PnL: {pnl_pct:+.2f}%)")
 
             spy_rsi = portfolio.get("spy_rsi_14")
             if spy_rsi is not None and spy_rsi < 30:

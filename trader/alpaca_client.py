@@ -5,7 +5,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce, AssetStatus, OrderClass
 from alpaca.data import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestBarRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 from .config import Config
 
@@ -116,6 +116,27 @@ class AlpacaClient:
     def get_market_status(self):
         clock = self.trading.get_clock()
         return clock.is_open
+
+    def get_market_holidays(self, start: date, end: date) -> list:
+        """Weekday dates in [start, end] that are NOT trading sessions (US market
+        holidays), from Alpaca's official calendar. Feeds the trading-day holding-
+        period clock. Returns [] on any failure → caller degrades to weekends-only."""
+        from alpaca.trading.requests import GetCalendarRequest
+        try:
+            sessions = self.trading.get_calendar(GetCalendarRequest(start=start, end=end))
+            session_dates = set()
+            for s in sessions:
+                sd = s.date if isinstance(s.date, date) else datetime.fromisoformat(str(s.date)[:10]).date()
+                session_dates.add(sd)
+        except Exception as e:
+            logger.warning(f"get_market_holidays failed ({e}); using weekends-only")
+            return []
+        holidays, d = [], start
+        while d <= end:
+            if d.weekday() < 5 and d not in session_dates:
+                holidays.append(d)
+            d += timedelta(days=1)
+        return holidays
 
     def get_daily_pl(self):
         acct = self.get_account()
