@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from datetime import datetime, date
+import numpy as np
 from .config import Config
 
 logger = logging.getLogger("trader.risk")
@@ -17,6 +18,10 @@ class RiskManager:
         self.last_reset_date = date.today()
         self.positions = {}
         self.position_entry_dates: dict[str, datetime] = {}
+        # US market holidays (weekday non-sessions) used to count the holding period
+        # in *trading* days rather than calendar days. Refreshed daily by the bot from
+        # Alpaca's calendar; empty list ⇒ weekends-only (still excludes Sat/Sun).
+        self.market_holidays: list[date] = []
         self._load_state()
 
     def _state_path(self):
@@ -191,17 +196,26 @@ class RiskManager:
         logger.info(f"Trade recorded: {action} {quantity} {symbol} @ ${price:.2f} | PnL: {pnl:+.2f}% (${pnl_dollars:+.2f})")
         self._save_state()
 
+    @staticmethod
+    def trading_days_between(start_date: date, end_date: date, holidays: list = None) -> int:
+        """Number of trading sessions in [start_date, end_date) — weekends and the
+        given market holidays excluded. Used for the holding-period clock so it
+        counts *trading* days, not calendar days (a Fri buy isn't "3 days old" on
+        Mon)."""
+        hol = np.array(holidays or [], dtype="datetime64[D]")
+        return int(np.busday_count(start_date, end_date, holidays=hol))
+
     def get_expired_positions(self, current_positions: list, max_days: int = None) -> list[str]:
         if max_days is None:
             max_days = Config.RISK_MAX_HOLDING_DAYS
         expired = []
-        now = datetime.now()
+        today = datetime.now().date()
         for pos in current_positions:
             entry = self.position_entry_dates.get(pos.symbol)
-            if entry and (now - entry).days >= max_days:
+            if entry and self.trading_days_between(entry.date(), today, self.market_holidays) >= max_days:
                 expired.append(pos.symbol)
         if expired:
-            logger.info(f"Expired positions ({max_days}+ days): {', '.join(expired)}")
+            logger.info(f"Expired positions ({max_days}+ trading days): {', '.join(expired)}")
         return expired
 
     def get_stop_loss_price(self, entry_price: float) -> float:
