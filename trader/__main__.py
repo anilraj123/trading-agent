@@ -560,11 +560,16 @@ class TradingBot:
     def _execute_decisions(self, decisions: dict, portfolio: dict) -> list:
         action_results = []
 
-        # Total stock deployment cap: never use more than N% of cash for stock positions.
-        # The remainder acts as an options buying power buffer.
+        # Total stock deployment cap: keep total stock market value under N% of the
+        # equity bot's footprint (cash already held + stock already held ≈ its equity).
+        # NOTE: anchor on (cash + stock_mv), NOT cash alone. Cash shrinks as the bot
+        # buys, so a cash-only anchor chases stock_mv down and they converge at only
+        # ~PCT/(1+PCT) ≈ 49% of equity — i.e. MAX_STOCK_DEPLOYMENT_PCT=0.95 silently
+        # behaved like a ~49% cap, stranding ~half the account in cash.
         positions = self.alpaca.get_positions()
         stock_mv = sum(float(p.qty) * float(p.current_price) for p in positions if len(p.symbol) <= 10)
         total_cash = portfolio["cash"]
+        deployable_base = total_cash + stock_mv
 
         for decision in decisions.get("decisions", []):
             symbol = decision.get("symbol")
@@ -601,10 +606,11 @@ class TradingBot:
                 logger.info(f"Lifted {symbol} qty to ${quantity * price:.0f} min notional (${MIN_NOTIONAL})")
 
             if action == "BUY" and quantity > 0:
-                # Stock deployment cap: never exceed N% of cash in total stock market value.
-                # This reserves the remaining cash as an options buying power buffer.
+                # Stock deployment cap: total stock value stays under N% of the
+                # equity bot's footprint (cash + stock). Reserves the remainder as a
+                # fees/slippage (and, if re-enabled, options) buffer.
                 cost = quantity * price
-                max_stock_deploy = total_cash * Config.MAX_STOCK_DEPLOYMENT_PCT
+                max_stock_deploy = deployable_base * Config.MAX_STOCK_DEPLOYMENT_PCT
                 headroom = max_stock_deploy - stock_mv
                 if cost > headroom:
                     if headroom <= 0:
