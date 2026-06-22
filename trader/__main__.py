@@ -437,7 +437,11 @@ class TradingBot:
         stock_daily_pl = stock_unrealized + self.risk.daily_pnl
 
         stock_mv = sum(float(p.qty) * float(p.current_price) for p in positions if len(p.symbol) <= 10)
-        max_stock_deploy = cash * Config.MAX_STOCK_DEPLOYMENT_PCT
+        # Anchor on the equity bot's footprint (cash + stock), NOT cash alone — same
+        # reason as _execute_decisions: a cash-only anchor makes the % shoot to ~100%
+        # at only ~49% of equity, so the LLM is told "AT CAP" and stops buying. Must
+        # match the _execute_decisions cap or the prompt and the executor disagree.
+        max_stock_deploy = (cash + stock_mv) * Config.MAX_STOCK_DEPLOYMENT_PCT
         stock_deploy_pct = (stock_mv / max_stock_deploy * 100) if max_stock_deploy > 0 else 0
 
         technical_analysis = {}
