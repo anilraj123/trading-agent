@@ -572,6 +572,11 @@ class TradingBot:
         # behaved like a ~49% cap, stranding ~half the account in cash.
         positions = self.alpaca.get_positions()
         stock_mv = sum(float(p.qty) * float(p.current_price) for p in positions if len(p.symbol) <= 10)
+        # Current market value already held per symbol — used to cap the *total*
+        # position (existing + new), not just each order. Without this the per-
+        # position size limit was effectively dead: the LLM topped up the same name
+        # ~$1 slice/cycle and it grew unbounded (GS reached 41% of the account).
+        held_mv = {p.symbol: float(p.qty) * float(p.current_price) for p in positions}
         total_cash = portfolio["cash"]
         deployable_base = total_cash + stock_mv
 
@@ -654,9 +659,16 @@ class TradingBot:
                     quantity = capped_qty
                     decision["quantity"] = quantity
 
-                if cost > max_position_value:
-                    max_qty = max_position_value / price
-                    logger.info(f"Capping {symbol} from {quantity} to {max_qty:.4f} (max ${max_position_value:.0f} position)")
+                # Per-position cap on the TOTAL position (existing holding + this order),
+                # not just the order — otherwise repeated top-ups concentrate the book.
+                position_room = max_position_value - held_mv.get(symbol, 0.0)
+                if position_room <= 0:
+                    logger.info(f"Rejecting BUY {symbol}: already at/over per-position cap (${held_mv.get(symbol, 0.0):.0f} / ${max_position_value:.0f})")
+                    action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "rejected", "reason": "Per-position cap reached"})
+                    continue
+                if cost > position_room:
+                    max_qty = position_room / price
+                    logger.info(f"Capping {symbol} from {quantity} to {max_qty:.4f} (position cap: held ${held_mv.get(symbol, 0.0):.0f} + order → max ${max_position_value:.0f})")
                     quantity = max_qty
                     decision["quantity"] = quantity
 
