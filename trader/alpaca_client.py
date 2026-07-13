@@ -42,6 +42,25 @@ class AlpacaClient:
     def cancel_all_orders(self):
         self.trading.cancel_orders()
 
+    def cancel_orders_for_symbol(self, symbol: str) -> int:
+        """Cancel all open orders for one symbol. Call before any bot-initiated
+        close/sell: a resting bracket/OTO stop leg holds the position's qty and
+        makes close_position / a SELL market order reject with 'insufficient qty'."""
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        try:
+            orders = self.trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol]))
+        except Exception as e:
+            logger.warning(f"Listing open orders for {symbol} failed: {e}")
+            return 0
+        for o in orders:
+            try:
+                self.trading.cancel_order_by_id(o.id)
+                logger.info(f"Cancelled resting order {o.id} for {symbol}")
+            except Exception as e:
+                logger.warning(f"Cancel {o.id} for {symbol} failed: {e}")
+        return len(orders)
+
     def submit_market_order(self, symbol: str, side: OrderSide, qty: float, stop_loss: float = None, take_profit: float = None):
         req = MarketOrderRequest(
             symbol=symbol,
@@ -78,6 +97,10 @@ class AlpacaClient:
         return order
 
     def close_position(self, symbol: str):
+        # Every close_position in this bot is a full liquidation, so cancelling the
+        # symbol's resting orders first is always correct — a live bracket/OTO stop
+        # leg would otherwise hold the qty and reject the close.
+        self.cancel_orders_for_symbol(symbol)
         order = self.trading.close_position(symbol)
         logger.info(f"Position closed: {symbol}")
         return order
@@ -116,6 +139,12 @@ class AlpacaClient:
     def get_market_status(self):
         clock = self.trading.get_clock()
         return clock.is_open
+
+    def get_clock(self):
+        """Full Alpaca clock: is_open, timestamp, next_open, next_close — all
+        tz-aware and from the same response, so time-to-close math is immune to
+        local-clock drift, DST, and early-close (1pm ET) days."""
+        return self.trading.get_clock()
 
     def get_market_holidays(self, start: date, end: date) -> list:
         """Weekday dates in [start, end] that are NOT trading sessions (US market

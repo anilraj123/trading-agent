@@ -98,7 +98,8 @@ def needs_llm_review(technical_analysis: dict, stock_positions: list, regime_mod
 def _build_system_prompt(account_value: float = None) -> str:
     if account_value is None:
         account_value = Config.SIMULATED_ACCOUNT_SIZE
-    stop_pct = abs(Config.TA_STOP_LOSS_PCT) * 100
+    stop_pct = abs(Config.RISK_STOP_LOSS_PCT) * 100
+    disaster_pct = abs(Config.RISK_INTRADAY_STOP_PCT) * 100
     daily_loss_amt = abs(Config.RISK_DAILY_LOSS_LIMIT / 100 * account_value)
     trading_capital = account_value * Config.TRADING_CAPITAL_ALLOCATION
     target_pos = Config.target_positions(trading_capital)
@@ -131,7 +132,7 @@ SELL SIGNALS (Score >= {Config.TA_MIN_SELL_SCORE}):
 
 RISK RULES:
 - ${account_value:.0f} account. Max ${max_pos:.0f} per trade ({100 / target_pos:.0f}% per position across {target_pos} target positions).
-- Stop loss at {stop_pct:.0f}% from entry.
+- Stops are automated: -{stop_pct:.0f}% from entry evaluated in the last {Config.RISK_CLOSE_WINDOW_MIN} min of the session (daily-bar discipline), plus a -{disaster_pct:.0f}% intraday disaster stop. Do not pre-empt the close stop on intraday noise.
 - Max {max_trades} trades per day.
 - Daily loss limit: {abs(Config.RISK_DAILY_LOSS_LIMIT):.1f}% of account (${daily_loss_amt:.2f}).
 - If uncertain, HOLD.
@@ -326,9 +327,9 @@ DECISION RULES:
 1. BUY when buy_score >= {Config.TA_MIN_BUY_SCORE} (momentum confirmation signals)
 2. SELL: do not recommend SELL on a position unless EITHER:
    a. sell_score >= {Config.TA_MIN_SELL_SCORE:.1f} (deterministic signal), OR
-   b. unrealized P&L <= {Config.LLM_SELL_REVIEW_PNL_PCT:.1f}% (approaching stop), OR
+   b. unrealized P&L <= {Config.LLM_SELL_REVIEW_PNL_PCT:.1f}% (deteriorating — decide whether to exit ahead of the close-window stop), OR
    c. DTE-based rule applies (options only)
-3. Use stop loss at {Config.TA_STOP_LOSS_PCT:.0%} from entry price
+3. Hard stops are automated: {Config.RISK_STOP_LOSS_PCT:.0%} from entry evaluated in the last {Config.RISK_CLOSE_WINDOW_MIN} min of the session (daily-bar discipline), plus a {Config.RISK_INTRADAY_STOP_PCT:.0%} intraday disaster stop. Do not pre-empt the close stop on intraday noise.
 4. Position size max ${max_pos:.0f} per trade (target {target_pos} concurrent positions)
 5. All indicators are on daily bars — MACD(8/21/5) captures ~3-week trends, momentum(5) = 5-day % change
 6. Only trade stocks with clear momentum signals (no mean-reversion plays)

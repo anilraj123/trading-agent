@@ -13,7 +13,7 @@ from rich.panel import Panel
 from .config import Config
 from .alpaca_client import AlpacaClient
 from .llm_engine import LLMEngine, needs_llm_review
-from .risk_manager import RiskManager
+from .risk_manager import RiskManager, in_close_window
 from .technical_analysis import TechnicalAnalysis
 from .stock_discovery import StockDiscovery
 from .notifications import NotificationManager
@@ -122,7 +122,18 @@ class TradingBot:
         total_deposits = self.total_known_deposits
         self.account_value = current_equity - total_deposits
         self.trading_capital = self.account_value * self.trading_capital_allocation
-        market_open = self.alpaca.get_market_status()
+        # One clock call drives both the open check and the close-window stop
+        # gate. Fail closed on a transient clock error: skip the cycle entirely
+        # (before the open/close notification state machine, so no spurious
+        # market-closed summary) — this line runs outside the cycle's
+        # try/except and would otherwise kill the loop.
+        try:
+            clock = self.alpaca.get_clock()
+        except Exception as e:
+            logger.warning(f"Clock fetch failed ({e}) — skipping cycle")
+            return
+        market_open = clock.is_open
+        close_window = in_close_window(clock, Config.RISK_CLOSE_WINDOW_MIN)
 
         if market_open != self.last_market_state:
             if market_open:
@@ -184,18 +195,24 @@ class TradingBot:
                     logger.debug(f"paused-cycle logging failed: {e}")
                 return
 
-            stop_loss_orders = self.risk.check_stop_losses(positions)
+            stop_loss_orders = self.risk.check_stop_losses(positions, close_window=close_window)
+            # Symbols force-closed this cycle: the LLM must not rebuy them below
+            # (the close order may not even be filled yet).
+            exited_this_cycle = set()
             for order in stop_loss_orders:
                 self.alpaca.close_position(order["symbol"])
                 # Drop the risk-manager entry so the next cycle doesn't try to fire a
                 # second stop on a position that's already been closed.
                 self.risk.unregister_position(order["symbol"])
+                exited_this_cycle.add(order["symbol"])
                 pnl_pct = (order["current_price"] - order["entry_price"]) / order["entry_price"] * 100
                 dollar_pnl = (order["current_price"] - order["entry_price"]) * order["quantity"]
                 self.risk.total_realized_pnl += dollar_pnl
+                is_disaster = order.get("stop_type") == "intraday_disaster"
+                action_label = "SELL (DISASTER STOP)" if is_disaster else "SELL (STOP LOSS)"
                 # Forced exit (stop-loss): don't count toward the daily voluntary-trade cap.
-                self.risk.record_trade(order["symbol"], "SELL (STOP LOSS)", order["quantity"], order["current_price"], pnl=pnl_pct, pnl_dollars=dollar_pnl, counts_toward_daily_cap=False)
-                save_trade("trading", order["symbol"], "STOP LOSS", order["quantity"], entry_price=order["entry_price"], exit_price=order["current_price"], pnl_pct=pnl_pct, pnl_dollars=dollar_pnl)
+                self.risk.record_trade(order["symbol"], action_label, order["quantity"], order["current_price"], pnl=pnl_pct, pnl_dollars=dollar_pnl, counts_toward_daily_cap=False)
+                save_trade("trading", order["symbol"], "DISASTER STOP" if is_disaster else "STOP LOSS", order["quantity"], entry_price=order["entry_price"], exit_price=order["current_price"], pnl_pct=pnl_pct, pnl_dollars=dollar_pnl, stop_type=order.get("stop_type"))
                 self.notif.notify_stop_loss(order["symbol"], order["entry_price"], order["current_price"], pnl_pct)
 
             # Refresh market holidays once per day so the holding-period clock counts
@@ -217,6 +234,7 @@ class TradingBot:
                 dollar_pnl = (curr_p - entry_p) * qty
                 self.alpaca.close_position(sym)
                 self.risk.unregister_position(sym)
+                exited_this_cycle.add(sym)
                 self.risk.total_realized_pnl += dollar_pnl
                 # Forced exit (holding-period expiry): don't count toward the daily voluntary-trade cap.
                 self.risk.record_trade(sym, "SELL (EXPIRY)", qty, curr_p, pnl=pnl_pct, pnl_dollars=dollar_pnl, counts_toward_daily_cap=False)
@@ -255,7 +273,7 @@ class TradingBot:
                 if "error" in decisions:
                     self.notif.send(f"LLM parse error: {decisions.get('summary')}", priority="high")
                 try:
-                    actions_taken = self._execute_decisions(decisions, portfolio)
+                    actions_taken = self._execute_decisions(decisions, portfolio, skip_symbols=exited_this_cycle)
                 except Exception as e:
                     logger.error(f"Executing decisions failed (LLM report still sent): {e}")
                     actions_taken = []
@@ -561,8 +579,12 @@ class TradingBot:
             "stock_deployment_at_cap": stock_mv >= max_stock_deploy * 0.95
         }
 
-    def _execute_decisions(self, decisions: dict, portfolio: dict) -> list:
+    def _execute_decisions(self, decisions: dict, portfolio: dict, skip_symbols: set = None) -> list:
         action_results = []
+        # Symbols force-exited earlier in this same cycle (stop/expiry). Their
+        # close orders may not be filled yet, so a rebuy could double up — and
+        # rebuying a name the risk layer just ejected defeats the ejection.
+        skip_symbols = skip_symbols or set()
 
         # Total stock deployment cap: keep total stock market value under N% of the
         # equity bot's footprint (cash already held + stock already held ≈ its equity).
@@ -590,6 +612,11 @@ class TradingBot:
                 continue
 
             sym_upper = symbol.upper()
+            if sym_upper in skip_symbols:
+                logger.info(f"Skipping {symbol} - force-exited earlier this cycle")
+                action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": 0, "status": "rejected", "reason": "Force-exited this cycle"})
+                continue
+
             if sym_upper in Config.BLACKLIST:
                 logger.info(f"Skipping {symbol} - blacklisted")
                 action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": 0, "status": "rejected", "reason": "Blacklisted"})
@@ -723,7 +750,10 @@ class TradingBot:
 
             try:
                 if action == "BUY" and quantity > 0:
-                    stop_loss_price = price * (1 + Config.TA_STOP_LOSS_PCT)
+                    # Bracket leg at the DISASTER level, not -3%: the broker-side
+                    # stop is a redundant intraday backstop; the primary -3% exit
+                    # is the software close-window stop (daily-bar discipline).
+                    stop_loss_price = self.risk.get_disaster_stop_price(price)
                     use_bracket = quantity == int(quantity)
                     order_stop = stop_loss_price if use_bracket else None
 
@@ -742,10 +772,14 @@ class TradingBot:
                     self.notif.notify_trade("BUY", symbol, quantity, fill_price)
                     save_trade("trading", symbol, "BUY", quantity, entry_price=fill_price, strategy=strategy, reason=decision.get("reasoning"))
                     stock_mv += quantity * fill_price  # track for subsequent buys in this cycle
-                    logger.info(f"BUY {quantity} {symbol} @ ${fill_price:.2f} [{strategy}] stop=${stop_loss_price:.2f}{' [bracket]' if use_bracket else ' [software stop]'}")
-                    action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "executed", "reason": f"stop={stop_loss_price:.2f} bracket={use_bracket}"})
+                    logger.info(f"BUY {quantity} {symbol} @ ${fill_price:.2f} [{strategy}] disaster_stop=${stop_loss_price:.2f}{' [bracket]' if use_bracket else ' [software]'} (-{abs(Config.RISK_STOP_LOSS_PCT):.0%} eval'd at close)")
+                    action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": price, "status": "executed", "reason": f"disaster_stop={stop_loss_price:.2f} bracket={use_bracket}"})
 
                 elif action == "SELL" and quantity > 0:
+                    # A same-day whole-share buy leaves a resting bracket stop leg
+                    # that holds the qty — cancel it or this sell is rejected.
+                    # (close_position cancels internally; this path bypasses it.)
+                    self.alpaca.cancel_orders_for_symbol(symbol)
                     self.alpaca.submit_market_order(symbol, OrderSide.SELL, quantity)
                     # Unregister only after submit succeeds, so a failed sell doesn't
                     # silently drop the stop-loss tracking on a position we still hold.
@@ -780,14 +814,14 @@ class TradingBot:
             f"Trades: {risk_status['daily_trades']}/{risk_status['max_trades']} | "
             f"Watchlist: {len(self.watchlist)} stocks | "
             f"TA computed: {len(portfolio['technical_analysis'])} stocks | "
-            f"Stop Loss: {Config.TA_STOP_LOSS_PCT:.0%}",
+            f"Stop: {Config.RISK_STOP_LOSS_PCT:.0%}@close / {Config.RISK_INTRADAY_STOP_PCT:.0%} intraday",
             title="Status",
             border_style="green"
         ))
 
     def start(self):
         strategy_label = f"Active (RSI {Config.TA_RSI_OVERSOLD:.0f}/{Config.TA_RSI_OVERBOUGHT:.0f}, MACD, BB, Trend)"
-        stop_label = f"{Config.TA_STOP_LOSS_PCT:.0%}"
+        stop_label = f"{Config.RISK_STOP_LOSS_PCT:.0%} @close / {Config.RISK_INTRADAY_STOP_PCT:.0%} intraday"
         console.print(Panel(
             f"[bold green]AI Trading Agent Started[/]\n"
             f"Discovery: Dynamic (100-stock universe + live trending)\n"
