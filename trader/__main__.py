@@ -170,6 +170,9 @@ class TradingBot:
             positions = self.alpaca.get_positions()
             stock_positions = [p for p in positions if len(p.symbol) <= 10]
             self.risk.sync_from_alpaca(stock_positions)
+            # Ratchet high-water marks / activate trailing BEFORE any exit checks,
+            # so this cycle's exits see this cycle's peaks.
+            self.risk.update_trailing(stock_positions)
 
             stock_unrealized = sum(float(p.unrealized_pl) for p in positions if len(p.symbol) <= 10)
             can_trade, reason = self.risk.can_trade(self.trading_capital, unrealized_pnl=stock_unrealized)
@@ -214,6 +217,25 @@ class TradingBot:
                 self.risk.record_trade(order["symbol"], action_label, order["quantity"], order["current_price"], pnl=pnl_pct, pnl_dollars=dollar_pnl, counts_toward_daily_cap=False)
                 save_trade("trading", order["symbol"], "DISASTER STOP" if is_disaster else "STOP LOSS", order["quantity"], entry_price=order["entry_price"], exit_price=order["current_price"], pnl_pct=pnl_pct, pnl_dollars=dollar_pnl, stop_type=order.get("stop_type"))
                 self.notif.notify_stop_loss(order["symbol"], order["entry_price"], order["current_price"], pnl_pct)
+
+            # Trailing exits for activated winners (gain reached
+            # RISK_TRAIL_ACTIVATE_PCT, price now RISK_TRAIL_STOP_PCT off the
+            # high-water mark). Runs after hard stops (disaster wins on a gap
+            # below both) and before expiry (trailing positions are exempt).
+            trailing_exits = self.risk.check_trailing_stops(stock_positions)
+            for order in trailing_exits:
+                if order["symbol"] in exited_this_cycle:
+                    continue
+                self.alpaca.close_position(order["symbol"])
+                self.risk.unregister_position(order["symbol"])
+                exited_this_cycle.add(order["symbol"])
+                pnl_pct = (order["current_price"] - order["entry_price"]) / order["entry_price"] * 100
+                dollar_pnl = (order["current_price"] - order["entry_price"]) * order["quantity"]
+                self.risk.total_realized_pnl += dollar_pnl
+                # Forced exit (trailing stop): don't count toward the daily voluntary-trade cap.
+                self.risk.record_trade(order["symbol"], "SELL (TRAILING)", order["quantity"], order["current_price"], pnl=pnl_pct, pnl_dollars=dollar_pnl, counts_toward_daily_cap=False)
+                save_trade("trading", order["symbol"], "TRAILING STOP", order["quantity"], entry_price=order["entry_price"], exit_price=order["current_price"], pnl_pct=pnl_pct, pnl_dollars=dollar_pnl, stop_type="trailing")
+                self.notif.send(f"Trailing exit {order['symbol']}: hwm ${order['hwm']:.2f} → ${order['current_price']:.2f} (PnL {pnl_pct:+.2f}%)")
 
             # Refresh market holidays once per day so the holding-period clock counts
             # trading days (weekends + holidays excluded), not calendar days. A 21-day

@@ -133,6 +133,7 @@ SELL SIGNALS (Score >= {Config.TA_MIN_SELL_SCORE}):
 RISK RULES:
 - ${account_value:.0f} account. Max ${max_pos:.0f} per trade ({100 / target_pos:.0f}% per position across {target_pos} target positions).
 - Stops are automated: -{stop_pct:.0f}% from entry evaluated in the last {Config.RISK_CLOSE_WINDOW_MIN} min of the session (daily-bar discipline), plus a -{disaster_pct:.0f}% intraday disaster stop. Do not pre-empt the close stop on intraday noise.
+- Winners: once a position is up {Config.RISK_TRAIL_ACTIVATE_PCT:.0%} it trails a {Config.RISK_TRAIL_STOP_PCT:.0%} stop from its high-water mark and is exempt from the {Config.RISK_MAX_HOLDING_DAYS}-day expiry. Let winners run — do NOT take profits early just because a position is up.
 - Max {max_trades} trades per day.
 - Daily loss limit: {abs(Config.RISK_DAILY_LOSS_LIMIT):.1f}% of account (${daily_loss_amt:.2f}).
 - If uncertain, HOLD.
@@ -329,7 +330,7 @@ DECISION RULES:
    a. sell_score >= {Config.TA_MIN_SELL_SCORE:.1f} (deterministic signal), OR
    b. unrealized P&L <= {Config.LLM_SELL_REVIEW_PNL_PCT:.1f}% (deteriorating — decide whether to exit ahead of the close-window stop), OR
    c. DTE-based rule applies (options only)
-3. Hard stops are automated: {Config.RISK_STOP_LOSS_PCT:.0%} from entry evaluated in the last {Config.RISK_CLOSE_WINDOW_MIN} min of the session (daily-bar discipline), plus a {Config.RISK_INTRADAY_STOP_PCT:.0%} intraday disaster stop. Do not pre-empt the close stop on intraday noise.
+3. Hard stops are automated: {Config.RISK_STOP_LOSS_PCT:.0%} from entry evaluated in the last {Config.RISK_CLOSE_WINDOW_MIN} min of the session (daily-bar discipline), plus a {Config.RISK_INTRADAY_STOP_PCT:.0%} intraday disaster stop. Do not pre-empt the close stop on intraday noise. Winners up {Config.RISK_TRAIL_ACTIVATE_PCT:.0%}+ trail a {Config.RISK_TRAIL_STOP_PCT:.0%} stop from their high-water mark and are exempt from the {Config.RISK_MAX_HOLDING_DAYS}-day expiry — let winners run.
 4. Position size max ${max_pos:.0f} per trade (target {target_pos} concurrent positions)
 5. All indicators are on daily bars — MACD(8/21/5) captures ~3-week trends, momentum(5) = 5-day % change
 6. Only trade stocks with clear momentum signals (no mean-reversion plays)

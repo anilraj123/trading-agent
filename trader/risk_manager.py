@@ -32,6 +32,13 @@ class RiskManager:
         self.last_reset_date = date.today()
         self.positions = {}
         self.position_entry_dates: dict[str, datetime] = {}
+        # Per-symbol trailing state: {"hwm": float, "trailing": bool}. Persisted
+        # (unlike self.positions) — a restart must not reset a winner's high-water
+        # mark, or its trailing exit silently moves down. "trailing" is a sticky
+        # explicit bool, NOT derived from hwm vs entry: entry is rebuilt from
+        # Alpaca's avg_entry_price after a restart and drifts on top-ups, so
+        # deriving could de-activate a trailing winner and re-expose it to expiry.
+        self.position_trail: dict[str, dict] = {}
         # US market holidays (weekday non-sessions) used to count the holding period
         # in *trading* days rather than calendar days. Refreshed daily by the bot from
         # Alpaca's calendar; empty list ⇒ weekends-only (still excludes Sat/Sun).
@@ -54,6 +61,7 @@ class RiskManager:
                 "position_entry_dates": {
                     sym: dt.isoformat() for sym, dt in self.position_entry_dates.items()
                 },
+                "position_trail": self.position_trail,
             }
             with open(path, "w") as f:
                 json.dump(state, f)
@@ -76,6 +84,8 @@ class RiskManager:
             self.position_entry_dates = {
                 sym: datetime.fromisoformat(dt) for sym, dt in ped.items()
             }
+            # Missing key (pre-trailing state file) loads cleanly as {}.
+            self.position_trail = state.get("position_trail", {})
             logger.info(f"Loaded risk state: {self.daily_trades} trades, ${self.daily_pnl:.2f} P&L, {len(self.position_entry_dates)} entry dates")
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
             pass
@@ -158,12 +168,20 @@ class RiskManager:
             "date": datetime.now()
         }
         logger.info(f"Stops set for {symbol}: ${stop_loss:.2f} ({Config.RISK_STOP_LOSS_PCT:.0%} @close) / ${disaster_stop:.2f} ({Config.RISK_INTRADAY_STOP_PCT:.0%} intraday) from ${entry_price:.2f}")
+        # Trail entry: a top-up of an already-trailing winner must NOT reset its
+        # high-water mark or de-activate the trail — merge, don't overwrite.
+        existing = self.position_trail.get(symbol)
+        if existing:
+            existing["hwm"] = max(existing["hwm"], entry_price)
+        else:
+            self.position_trail[symbol] = {"hwm": entry_price, "trailing": False}
         self._save_state()
 
     def unregister_position(self, symbol: str):
         """Call AFTER a sell/close order is successfully submitted."""
         self.positions.pop(symbol, None)
         self.position_entry_dates.pop(symbol, None)
+        self.position_trail.pop(symbol, None)
         self._save_state()
 
     @staticmethod
@@ -218,6 +236,63 @@ class RiskManager:
 
         return stop_loss_triggers
 
+    def update_trailing(self, current_positions: list):
+        """Ratchet each tracked position's high-water mark (up only) and flip it
+        to 'trailing' once the hwm reaches entry x (1 + RISK_TRAIL_ACTIVATE_PCT).
+        Sticky: once trailing, always trailing (until the position closes).
+        Call once per cycle BEFORE any exit checks."""
+        changed = False
+        for pos in current_positions:
+            sym = pos.symbol
+            if sym not in self.positions:
+                continue
+            price = self._position_price(pos)
+            if price <= 0:
+                continue
+            t = self.position_trail.setdefault(sym, {"hwm": self.positions[sym]["entry_price"], "trailing": False})
+            if price > t["hwm"]:
+                t["hwm"] = price
+                changed = True
+            entry = self.positions[sym]["entry_price"]
+            if not t["trailing"] and entry > 0 and t["hwm"] >= entry * (1 + Config.RISK_TRAIL_ACTIVATE_PCT):
+                t["trailing"] = True
+                changed = True
+                logger.info(f"Trailing activated for {sym}: hwm=${t['hwm']:.2f} (entry ${entry:.2f}) — exempt from {Config.RISK_MAX_HOLDING_DAYS}-day expiry")
+        if changed:
+            self._save_state()
+
+    def check_trailing_stops(self, current_positions: list) -> list:
+        """Trailing exits for activated winners: fire when price <= hwm x
+        (1 + RISK_TRAIL_STOP_PCT). Evaluated every cycle — unlike the close-window
+        stop this realizes a locked gain (floor ~ breakeven by construction), and
+        close-only evaluation would expose an activated winner to a full intraday
+        reversal. Skips symbols already removed from self.positions this cycle."""
+        triggers = []
+        for pos in current_positions:
+            sym = pos.symbol
+            if sym not in self.positions:
+                continue
+            t = self.position_trail.get(sym)
+            if not t or not t.get("trailing"):
+                continue
+            price = self._position_price(pos)
+            trail_price = t["hwm"] * (1 + Config.RISK_TRAIL_STOP_PCT)
+            if 0 < price <= trail_price:
+                triggers.append({
+                    "symbol": sym,
+                    "hwm": t["hwm"],
+                    "trail_price": trail_price,
+                    "current_price": price,
+                    "quantity": float(pos.qty),
+                    "entry_price": self.positions[sym]["entry_price"],
+                    "stop_type": "trailing",
+                })
+                logger.warning(f"TRAILING STOP TRIGGERED: {sym} at ${price:.2f} (hwm ${t['hwm']:.2f} → trail ${trail_price:.2f})")
+        return triggers
+
+    def is_trailing(self, symbol: str) -> bool:
+        return self.position_trail.get(symbol, {}).get("trailing", False)
+
     def record_trade(self, symbol: str, action: str, quantity: float, price: float, pnl: float = 0, pnl_dollars: float = 0, strategy: str = "unknown", counts_toward_daily_cap: bool = True):
         # `pnl` is the percentage gain/loss on this trade (used for the wins/losses
         # buckets and the human-readable log). `pnl_dollars` is what feeds the
@@ -259,6 +334,11 @@ class RiskManager:
         expired = []
         today = datetime.now().date()
         for pos in current_positions:
+            # Trailing winners are exempt: their exit is the hwm-based trailing
+            # stop (floor ~ breakeven), not the clock — the expiry was truncating
+            # exactly the winners the strategy needs to pay for its losers.
+            if self.is_trailing(pos.symbol):
+                continue
             entry = self.position_entry_dates.get(pos.symbol)
             if entry and self.trading_days_between(entry.date(), today, self.market_holidays) >= max_days:
                 expired.append(pos.symbol)
@@ -301,6 +381,20 @@ class RiskManager:
                     # Don't overwrite persisted entry dates on restart
                     if symbol not in self.position_entry_dates:
                         self.position_entry_dates[symbol] = now
+                    # NEVER clobber a persisted trail entry — that's the whole
+                    # point of persisting it (a restart must not reset a winner's
+                    # hwm and silently lower its trailing exit). Only initialize
+                    # symbols we've never tracked: hwm = max(entry, current) — we
+                    # know the price reached at least the current level; entry
+                    # alone would register a fake drawdown for a synced winner,
+                    # current alone would under-set hwm for one that just dipped.
+                    if symbol not in self.position_trail:
+                        current = self._position_price(pos)
+                        hwm = max(entry_price, current) if current > 0 else entry_price
+                        self.position_trail[symbol] = {
+                            "hwm": hwm,
+                            "trailing": hwm >= entry_price * (1 + Config.RISK_TRAIL_ACTIVATE_PCT),
+                        }
                     logger.info(f"Synced {symbol} from Alpaca: entry=${entry_price:.2f} stop=${stop_loss:.2f}")
                 except (ValueError, AttributeError) as e:
                     logger.debug(f"Could not sync {symbol}: {e}")
@@ -309,6 +403,13 @@ class RiskManager:
             if symbol not in alpaca_symbols:
                 self.positions.pop(symbol, None)
                 self.position_entry_dates.pop(symbol, None)
+        # Trail entries are persisted and can reference symbols self.positions
+        # doesn't know (restart: trail state loaded from disk, positions rebuilt
+        # here) — sweep them against Alpaca directly or stale winners' state
+        # leaks forever.
+        for symbol in list(self.position_trail.keys()):
+            if symbol not in alpaca_symbols:
+                self.position_trail.pop(symbol, None)
         self._save_state()
 
     def get_status(self, portfolio_value: float = None) -> dict:
@@ -323,6 +424,7 @@ class RiskManager:
             "remaining_capacity": max_trades - self.daily_trades,
             "distance_to_loss_limit": round(self.daily_pnl - daily_loss_limit, 2),
             "open_positions": len(self.positions),
+            "trailing_positions": sum(1 for s in self.positions if self.is_trailing(s)),
             "stop_loss_pct": Config.RISK_STOP_LOSS_PCT,
             "intraday_stop_pct": Config.RISK_INTRADAY_STOP_PCT,
             "close_window_min": Config.RISK_CLOSE_WINDOW_MIN

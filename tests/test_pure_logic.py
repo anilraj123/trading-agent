@@ -33,6 +33,8 @@ os.environ["TARGET_POSITIONS"] = "10"
 os.environ["RISK_STOP_LOSS_PCT"] = "-0.03"
 os.environ["RISK_INTRADAY_STOP_PCT"] = "-0.06"
 os.environ["RISK_CLOSE_WINDOW_MIN"] = "20"
+os.environ["RISK_TRAIL_ACTIVATE_PCT"] = "0.03"
+os.environ["RISK_TRAIL_STOP_PCT"] = "-0.03"
 
 from trader.config import Config
 from trader.technical_analysis import TechnicalAnalysis
@@ -400,6 +402,7 @@ class TestTradingDaysHoldingPeriod:
         from types import SimpleNamespace
         rm = RiskManager.__new__(RiskManager)            # skip __init__/state load
         rm.market_holidays = []
+        rm.position_trail = {}
         rm.position_entry_dates = {"AAA": datetime(2026, 6, 19, 14, 0)}
         # Monday is only 1 trading day later → not expired
         import trader.risk_manager as rmmod
@@ -588,3 +591,189 @@ class TestCancelOrdersForSymbol:
         client = self._client()
         client.trading.get_orders.side_effect = RuntimeError("api down")
         assert client.cancel_orders_for_symbol("AAA") == 0
+
+
+def _trail_rm(entry=100.0, hwm=None, trailing=False, entry_dt=None):
+    """RiskManager with one tracked position AAA and controllable trail state.
+    _save_state is stubbed out — persistence has its own tests below."""
+    rm = RiskManager.__new__(RiskManager)
+    rm.market_holidays = []
+    rm.positions = {
+        "AAA": {
+            "entry_price": entry,
+            "stop_loss": entry * (1 + Config.RISK_STOP_LOSS_PCT),
+            "disaster_stop": entry * (1 + Config.RISK_INTRADAY_STOP_PCT),
+            "quantity": 1.0,
+            "date": datetime(2026, 7, 10, 14, 0),
+        }
+    }
+    rm.position_entry_dates = {"AAA": entry_dt or datetime(2026, 7, 10, 14, 0)}
+    rm.position_trail = {"AAA": {"hwm": hwm if hwm is not None else entry, "trailing": trailing}}
+    rm._save_state = lambda: None
+    return rm
+
+
+def _mkpos(price, symbol="AAA"):
+    from types import SimpleNamespace
+    return SimpleNamespace(symbol=symbol, last_price=price, qty=1.0)
+
+
+class TestTrailingStop:
+    """update_trailing / check_trailing_stops / expiry exemption
+    (trader/risk_manager.py). Defaults: activate +3%, trail -3% from hwm."""
+
+    def test_hwm_ratchets_up_only(self):
+        rm = _trail_rm()
+        rm.update_trailing([_mkpos(104.0)])
+        assert rm.position_trail["AAA"]["hwm"] == 104.0
+        rm.update_trailing([_mkpos(102.0)])
+        assert rm.position_trail["AAA"]["hwm"] == 104.0  # never moves down
+
+    def test_trailing_activates_at_threshold(self):
+        rm = _trail_rm()
+        rm.update_trailing([_mkpos(102.9)])
+        assert rm.position_trail["AAA"]["trailing"] is False
+        rm.update_trailing([_mkpos(103.0)])          # exactly entry * 1.03
+        assert rm.position_trail["AAA"]["trailing"] is True
+
+    def test_trailing_sticky_after_decay(self):
+        # Activated, then price falls back to entry → still trailing (the trail
+        # exit will fire; it must not silently revert to expiry-governed)
+        rm = _trail_rm(hwm=104.0, trailing=True)
+        rm.update_trailing([_mkpos(100.0)])
+        assert rm.position_trail["AAA"]["trailing"] is True
+
+    def test_trailing_exit_fires_below_trail(self):
+        rm = _trail_rm(hwm=110.0, trailing=True)
+        triggers = rm.check_trailing_stops([_mkpos(106.6)])   # <= 110 * 0.97 = 106.7
+        assert len(triggers) == 1
+        assert triggers[0]["stop_type"] == "trailing"
+        assert triggers[0]["hwm"] == 110.0
+
+    def test_trailing_exit_holds_above_trail(self):
+        rm = _trail_rm(hwm=110.0, trailing=True)
+        assert rm.check_trailing_stops([_mkpos(106.8)]) == []
+
+    def test_not_trailing_never_trail_exits(self):
+        # Not activated: a -5% price is the (close-window) stop's job, not the trail's
+        rm = _trail_rm(hwm=102.0, trailing=False)
+        assert rm.check_trailing_stops([_mkpos(95.0)]) == []
+
+    def test_untracked_symbol_skipped(self):
+        # Symbol already force-closed this cycle (popped from positions) → no double-fire
+        rm = _trail_rm(hwm=110.0, trailing=True)
+        rm.positions.pop("AAA")
+        assert rm.check_trailing_stops([_mkpos(100.0)]) == []
+
+    def test_trailing_exempt_from_expiry(self):
+        import trader.risk_manager as rmmod
+        rm = _trail_rm(trailing=True, entry_dt=datetime(2026, 7, 6, 14, 0))
+        _FixedDT = type("_F", (datetime,), {"now": classmethod(lambda cls, tz=None: datetime(2026, 7, 13, 15, 0))})
+        orig = rmmod.datetime
+        rmmod.datetime = _FixedDT
+        try:
+            # 5 trading days old but trailing → NOT expired
+            assert rm.get_expired_positions([_mkpos(104.0)], max_days=3) == []
+            # same clock, not trailing → expires (regression on existing behavior)
+            rm.position_trail["AAA"]["trailing"] = False
+            assert rm.get_expired_positions([_mkpos(104.0)], max_days=3) == ["AAA"]
+        finally:
+            rmmod.datetime = orig
+
+    def test_register_topup_keeps_hwm_and_trailing(self):
+        rm = _trail_rm(hwm=110.0, trailing=True)
+        rm.register_position("AAA", 105.0, 2.0)      # top-up below the hwm
+        assert rm.position_trail["AAA"]["hwm"] == 110.0
+        assert rm.position_trail["AAA"]["trailing"] is True
+
+    def test_register_new_position_initializes_trail(self):
+        rm = _trail_rm()
+        rm.position_trail = {}
+        rm.register_position("BBB", 50.0, 1.0)
+        assert rm.position_trail["BBB"] == {"hwm": 50.0, "trailing": False}
+
+    def test_unregister_clears_trail_entry(self):
+        rm = _trail_rm()
+        rm.unregister_position("AAA")
+        assert "AAA" not in rm.position_trail
+
+
+class TestTrailStatePersistence:
+    """position_trail round-trips through risk_state.json; legacy files load."""
+
+    def _fresh_rm(self, tmpdir):
+        import trader.risk_manager as rmmod
+        orig = rmmod.STATE_FILE
+        rmmod.STATE_FILE = os.path.join(tmpdir, "risk_state.json")
+        return rmmod, orig
+
+    def test_roundtrip_position_trail(self, tmp_path):
+        import trader.risk_manager as rmmod
+        orig = rmmod.STATE_FILE
+        rmmod.STATE_FILE = str(tmp_path / "risk_state.json")
+        try:
+            rm = RiskManager()
+            rm.position_trail = {"XYZ": {"hwm": 108.0, "trailing": True}}
+            rm._save_state()
+            rm2 = RiskManager()
+            assert rm2.position_trail == {"XYZ": {"hwm": 108.0, "trailing": True}}
+        finally:
+            rmmod.STATE_FILE = orig
+
+    def test_legacy_state_file_without_trail_key(self, tmp_path):
+        import json as _json
+        import trader.risk_manager as rmmod
+        orig = rmmod.STATE_FILE
+        rmmod.STATE_FILE = str(tmp_path / "risk_state.json")
+        try:
+            with open(rmmod.STATE_FILE, "w") as f:
+                _json.dump({"daily_trades": 2, "position_entry_dates": {}}, f)
+            rm = RiskManager()
+            assert rm.position_trail == {}
+            assert rm.daily_trades == 2
+        finally:
+            rmmod.STATE_FILE = orig
+
+
+class TestSyncTrailMerge:
+    """sync_from_alpaca must never clobber a persisted hwm, and must initialize
+    untracked symbols at hwm = max(entry, current)."""
+
+    @staticmethod
+    def _alpaca_pos(symbol="AAA", entry=100.0, current=105.0):
+        from types import SimpleNamespace
+        return SimpleNamespace(symbol=symbol, avg_entry_price=entry, qty=1.0,
+                               last_price=current)
+
+    @staticmethod
+    def _bare_rm():
+        rm = RiskManager.__new__(RiskManager)
+        rm.positions = {}
+        rm.position_entry_dates = {}
+        rm.position_trail = {}
+        rm._save_state = lambda: None
+        return rm
+
+    def test_sync_preserves_persisted_hwm(self):
+        # Restart scenario: trail state was persisted, positions dict was not
+        rm = self._bare_rm()
+        rm.position_trail = {"AAA": {"hwm": 108.0, "trailing": True}}
+        rm.sync_from_alpaca([self._alpaca_pos(entry=100.0, current=105.5)])
+        assert rm.position_trail["AAA"] == {"hwm": 108.0, "trailing": True}
+
+    def test_sync_initializes_hwm_max_entry_current(self):
+        rm = self._bare_rm()
+        # dipped since entry → hwm floors at entry, not trailing
+        rm.sync_from_alpaca([self._alpaca_pos(entry=100.0, current=96.0)])
+        assert rm.position_trail["AAA"] == {"hwm": 100.0, "trailing": False}
+        # up 7% since entry → hwm = current, trailing already active
+        rm2 = self._bare_rm()
+        rm2.sync_from_alpaca([self._alpaca_pos(entry=100.0, current=107.0)])
+        assert rm2.position_trail["AAA"] == {"hwm": 107.0, "trailing": True}
+
+    def test_sync_removes_trail_for_closed_symbols(self):
+        rm = self._bare_rm()
+        rm.position_trail = {"GONE": {"hwm": 50.0, "trailing": True}}
+        rm.sync_from_alpaca([self._alpaca_pos(symbol="AAA")])
+        assert "GONE" not in rm.position_trail
+        assert "AAA" in rm.position_trail

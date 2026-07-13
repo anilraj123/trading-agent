@@ -41,6 +41,14 @@ class Config:
     # Must be >= TRADING_INTERVAL_MINUTES + worst-case cycle runtime (the schedule
     # lib spaces runs at interval + job duration) so one cycle always lands inside.
     RISK_CLOSE_WINDOW_MIN = int(os.getenv("RISK_CLOSE_WINDOW_MIN", "20"))
+    # Trailing stop for winners. Once unrealized gain >= RISK_TRAIL_ACTIVATE_PCT
+    # the position turns "trailing": exempt from the RISK_MAX_HOLDING_DAYS expiry,
+    # exits when price <= hwm * (1 + RISK_TRAIL_STOP_PCT). At +3%/-3% an activated
+    # winner exits ~breakeven-or-better (1.03 x 0.97 ~ 0.999 x entry worst case).
+    # Rationale: avgW/avgL ~ 1.35 at a 42% win rate ~ zero expectancy — the 3-day
+    # expiry truncated winners (BKNG +$30.59 showed the tail exists).
+    RISK_TRAIL_ACTIVATE_PCT = float(os.getenv("RISK_TRAIL_ACTIVATE_PCT", "0.03"))
+    RISK_TRAIL_STOP_PCT = float(os.getenv("RISK_TRAIL_STOP_PCT", "-0.03"))
     # Voluntary-trade circuit breaker (forced exits — stops/expiry — don't count).
     # Defaults to 2x TARGET_POSITIONS so the bot can fully establish OR rotate its
     # book in a day (sell all + buy all) without freezing mid-rebalance, while still
