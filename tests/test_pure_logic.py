@@ -30,11 +30,14 @@ os.environ["TA_VOL_THRESHOLD"] = "1.2"
 os.environ["TA_VOL_BOOST"] = "1.2"
 os.environ["TRADING_CAPITAL_ALLOCATION"] = "0.60"
 os.environ["TARGET_POSITIONS"] = "10"
+os.environ["RISK_STOP_LOSS_PCT"] = "-0.03"
+os.environ["RISK_INTRADAY_STOP_PCT"] = "-0.06"
+os.environ["RISK_CLOSE_WINDOW_MIN"] = "20"
 
 from trader.config import Config
 from trader.technical_analysis import TechnicalAnalysis
 from trader.llm_engine import _max_position_size, needs_llm_review
-from trader.risk_manager import RiskManager
+from trader.risk_manager import RiskManager, in_close_window
 
 # Import options bot pure functions by patching heavy deps at module level
 from unittest.mock import patch
@@ -414,3 +417,174 @@ class TestTradingDaysHoldingPeriod:
             assert rm.get_expired_positions([SimpleNamespace(symbol="AAA")], max_days=3) == ["AAA"]
         finally:
             rmmod.datetime = orig
+
+
+class TestCloseWindow:
+    """in_close_window (trader/risk_manager.py) — the gate that defers the
+    regular -3% stop to the last N minutes of the session. Clocks are faked
+    with SimpleNamespace carrying tz-aware datetimes, like Alpaca's clock."""
+
+    @staticmethod
+    def _clock(is_open=True, minutes_to_close=30):
+        from types import SimpleNamespace
+        from datetime import timezone, timedelta as td
+        now = datetime(2026, 7, 13, 15, 30, tzinfo=timezone.utc)
+        return SimpleNamespace(
+            is_open=is_open,
+            timestamp=now,
+            next_close=now + td(minutes=minutes_to_close),
+        )
+
+    def test_inside_window_true(self):
+        assert in_close_window(self._clock(minutes_to_close=10), 20) is True
+
+    def test_outside_window_false(self):
+        assert in_close_window(self._clock(minutes_to_close=45), 20) is False
+
+    def test_boundary_exact_window(self):
+        # <= semantics: exactly window minutes out is inside
+        assert in_close_window(self._clock(minutes_to_close=20), 20) is True
+
+    def test_market_closed_false(self):
+        assert in_close_window(self._clock(is_open=False, minutes_to_close=10), 20) is False
+
+    def test_early_close_day(self):
+        # 1pm-ET close: window math uses next_close, no hardcoded 16:00
+        from types import SimpleNamespace
+        from datetime import timezone, timedelta as td
+        et = timezone(td(hours=-4))
+        ts = datetime(2026, 11, 27, 12, 45, tzinfo=et)   # day after Thanksgiving
+        clock = SimpleNamespace(is_open=True, timestamp=ts,
+                                next_close=datetime(2026, 11, 27, 13, 0, tzinfo=et))
+        assert in_close_window(clock, 20) is True
+
+    def test_tz_mixed_offsets(self):
+        # UTC timestamp vs ET next_close, same instant family — subtraction is tz-safe
+        from types import SimpleNamespace
+        from datetime import timezone, timedelta as td
+        ts = datetime(2026, 7, 13, 19, 45, tzinfo=timezone.utc)          # 15:45 ET
+        close = datetime(2026, 7, 13, 16, 0, tzinfo=timezone(td(hours=-4)))  # 16:00 ET
+        clock = SimpleNamespace(is_open=True, timestamp=ts, next_close=close)
+        assert in_close_window(clock, 20) is True
+
+    def test_malformed_clock_fails_closed(self):
+        from types import SimpleNamespace
+        assert in_close_window(SimpleNamespace(is_open=True), 20) is False
+        assert in_close_window(None, 20) is False
+        assert in_close_window(SimpleNamespace(is_open=True, timestamp=None, next_close=None), 20) is False
+
+
+class TestTwoTierStops:
+    """check_stop_losses two-tier behavior: disaster stop every call, regular
+    stop only when close_window=True."""
+
+    @staticmethod
+    def _rm(entry=100.0):
+        rm = RiskManager.__new__(RiskManager)            # skip __init__/state load
+        rm.positions = {
+            "AAA": {
+                "entry_price": entry,
+                "stop_loss": entry * (1 + Config.RISK_STOP_LOSS_PCT),        # 97.0
+                "disaster_stop": entry * (1 + Config.RISK_INTRADAY_STOP_PCT),  # 94.0
+                "quantity": 1.0,
+                "date": datetime(2026, 7, 10, 14, 0),
+            }
+        }
+        return rm
+
+    @staticmethod
+    def _pos(price):
+        from types import SimpleNamespace
+        return [SimpleNamespace(symbol="AAA", last_price=price, qty=1.0)]
+
+    def test_disaster_fires_outside_window(self):
+        triggers = self._rm().check_stop_losses(self._pos(93.0), close_window=False)
+        assert len(triggers) == 1
+        assert triggers[0]["stop_type"] == "intraday_disaster"
+
+    def test_regular_stop_deferred_outside_window(self):
+        # -4%: below the regular stop, above disaster → held until the close window
+        assert self._rm().check_stop_losses(self._pos(96.0), close_window=False) == []
+
+    def test_regular_stop_fires_inside_window(self):
+        triggers = self._rm().check_stop_losses(self._pos(96.0), close_window=True)
+        assert len(triggers) == 1
+        assert triggers[0]["stop_type"] == "close_stop"
+
+    def test_no_double_trigger_in_window(self):
+        # -7% inside the window breaches both levels → exactly one trigger (disaster)
+        triggers = self._rm().check_stop_losses(self._pos(93.0), close_window=True)
+        assert len(triggers) == 1
+        assert triggers[0]["stop_type"] == "intraday_disaster"
+
+    def test_healthy_position_never_triggers(self):
+        assert self._rm().check_stop_losses(self._pos(99.0), close_window=False) == []
+        assert self._rm().check_stop_losses(self._pos(99.0), close_window=True) == []
+
+    def test_legacy_position_missing_disaster_key(self):
+        # Positions registered before the disaster tier existed: recomputed, no crash
+        rm = self._rm()
+        del rm.positions["AAA"]["disaster_stop"]
+        triggers = rm.check_stop_losses(self._pos(93.0), close_window=False)
+        assert len(triggers) == 1
+        assert triggers[0]["stop_type"] == "intraday_disaster"
+
+    def test_position_price_fallback_chain(self):
+        from types import SimpleNamespace
+        assert RiskManager._position_price(SimpleNamespace(last_price=10.0)) == 10.0
+        assert RiskManager._position_price(SimpleNamespace(current_price=11.0)) == 11.0
+        assert RiskManager._position_price(SimpleNamespace(market_value=24.0, qty=2.0)) == 12.0
+        assert RiskManager._position_price(SimpleNamespace(market_value=0.0, qty=0.0)) == 0.0
+
+
+class TestStopPrices:
+    def test_regular_stop_unchanged(self):
+        rm = RiskManager.__new__(RiskManager)
+        assert rm.get_stop_loss_price(100.0) == 97.0
+
+    def test_disaster_stop_price(self):
+        rm = RiskManager.__new__(RiskManager)
+        assert rm.get_disaster_stop_price(100.0) == 94.0
+        assert rm.get_disaster_stop_price(100.456) == round(100.456 * 0.94, 2)
+
+
+class TestCancelOrdersForSymbol:
+    """AlpacaClient.cancel_orders_for_symbol + the cancel-before-close ordering
+    (a resting bracket/OTO stop leg holds the qty and rejects the close)."""
+
+    @staticmethod
+    def _client():
+        from unittest.mock import MagicMock
+        with patch("trader.alpaca_client.TradingClient"), \
+             patch("trader.alpaca_client.StockHistoricalDataClient"):
+            from trader.alpaca_client import AlpacaClient
+            client = AlpacaClient()
+        client.trading = MagicMock()
+        return client
+
+    def test_cancels_each_open_order(self):
+        from types import SimpleNamespace
+        client = self._client()
+        client.trading.get_orders.return_value = [SimpleNamespace(id="o1"), SimpleNamespace(id="o2")]
+        assert client.cancel_orders_for_symbol("AAA") == 2
+        cancelled = [c.args[0] for c in client.trading.cancel_order_by_id.call_args_list]
+        assert cancelled == ["o1", "o2"]
+        req = client.trading.get_orders.call_args.args[0]
+        assert req.symbols == ["AAA"]
+
+    def test_close_position_cancels_first(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        client = self._client()
+        manager = MagicMock()
+        client.trading.get_orders.return_value = [SimpleNamespace(id="o1")]
+        manager.attach_mock(client.trading.cancel_order_by_id, "cancel")
+        manager.attach_mock(client.trading.close_position, "close")
+        client.close_position("AAA")
+        ops = [c[0] for c in manager.mock_calls]
+        assert ops.index("cancel") < ops.index("close")
+
+    def test_list_failure_returns_zero_and_does_not_raise(self):
+        client = self._client()
+        client.trading.get_orders.side_effect = RuntimeError("api down")
+        assert client.cancel_orders_for_symbol("AAA") == 0

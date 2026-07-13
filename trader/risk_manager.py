@@ -9,6 +9,20 @@ logger = logging.getLogger("trader.risk")
 
 STATE_FILE = f"{os.getenv('DATA_DIR', '/app/data')}/risk_state.json"
 
+def in_close_window(clock, window_minutes: int) -> bool:
+    """True when the session is open and within window_minutes of close.
+    Compares clock.timestamp to clock.next_close from the SAME Alpaca clock
+    response — immune to local-clock drift, DST, and early-close (1pm ET) days.
+    Fails closed (False) on a malformed clock: the regular stop then defers to
+    the next session's close window, which the live data says beats firing it
+    intraday."""
+    try:
+        if not clock.is_open:
+            return False
+        return (clock.next_close - clock.timestamp).total_seconds() <= window_minutes * 60
+    except (AttributeError, TypeError):
+        return False
+
 class RiskManager:
     def __init__(self):
         self.daily_trades = 0
@@ -134,14 +148,16 @@ class RiskManager:
         """Call AFTER a buy order is successfully submitted. Records the entry price,
         software stop-loss level, and entry timestamp used by check_stop_losses /
         get_expired_positions."""
-        stop_loss = entry_price * (1 + Config.TA_STOP_LOSS_PCT)
+        stop_loss = entry_price * (1 + Config.RISK_STOP_LOSS_PCT)
+        disaster_stop = entry_price * (1 + Config.RISK_INTRADAY_STOP_PCT)
         self.positions[symbol] = {
             "entry_price": entry_price,
             "stop_loss": stop_loss,
+            "disaster_stop": disaster_stop,
             "quantity": quantity,
             "date": datetime.now()
         }
-        logger.info(f"Stop loss set for {symbol}: ${stop_loss:.2f} ({Config.TA_STOP_LOSS_PCT:.0%} from ${entry_price:.2f})")
+        logger.info(f"Stops set for {symbol}: ${stop_loss:.2f} ({Config.RISK_STOP_LOSS_PCT:.0%} @close) / ${disaster_stop:.2f} ({Config.RISK_INTRADAY_STOP_PCT:.0%} intraday) from ${entry_price:.2f}")
         self._save_state()
 
     def unregister_position(self, symbol: str):
@@ -150,23 +166,55 @@ class RiskManager:
         self.position_entry_dates.pop(symbol, None)
         self._save_state()
 
-    def check_stop_losses(self, current_positions: list) -> list:
+    @staticmethod
+    def _position_price(pos) -> float:
+        """Best available price for an Alpaca position object. Live alpaca-py
+        positions expose current_price (not last_price); tests use last_price
+        via SimpleNamespace — keep it first for compat."""
+        for attr in ("last_price", "current_price"):
+            val = getattr(pos, attr, None)
+            if val is not None:
+                return float(val)
+        qty = float(pos.qty)
+        return float(pos.market_value) / qty if qty > 0 else 0.0
+
+    def check_stop_losses(self, current_positions: list, close_window: bool = False) -> list:
+        """Two-tier stops. The disaster stop (RISK_INTRADAY_STOP_PCT) fires on
+        every call; the regular stop (RISK_STOP_LOSS_PCT) fires only when
+        close_window=True — the TA signal is daily-bar, so realizing the -3%
+        stop on intraday prints sold noise, not signal (0-for-11 live). At most
+        one trigger per symbol; disaster takes precedence."""
         stop_loss_triggers = []
         for pos in current_positions:
             symbol = pos.symbol
-            if symbol in self.positions:
-                stop_price = self.positions[symbol]["stop_loss"]
-                current_price = float(pos.last_price) if hasattr(pos, 'last_price') else float(pos.market_value) / float(pos.qty) if float(pos.qty) > 0 else 0
+            if symbol not in self.positions:
+                continue
+            entry = self.positions[symbol]["entry_price"]
+            stop_price = self.positions[symbol]["stop_loss"]
+            # Positions registered before the disaster tier existed: recompute.
+            disaster_price = self.positions[symbol].get("disaster_stop", entry * (1 + Config.RISK_INTRADAY_STOP_PCT))
+            current_price = self._position_price(pos)
+            if current_price <= 0:
+                continue
 
-                if current_price <= stop_price and current_price > 0:
-                    stop_loss_triggers.append({
-                        "symbol": symbol,
-                        "stop_price": stop_price,
-                        "current_price": current_price,
-                        "quantity": float(pos.qty),
-                        "entry_price": self.positions[symbol]["entry_price"]
-                    })
-                    logger.warning(f"STOP LOSS TRIGGERED: {symbol} at ${current_price:.2f} (stop: ${stop_price:.2f})")
+            if current_price <= disaster_price:
+                stop_type = "intraday_disaster"
+                triggered_at = disaster_price
+            elif close_window and current_price <= stop_price:
+                stop_type = "close_stop"
+                triggered_at = stop_price
+            else:
+                continue
+
+            stop_loss_triggers.append({
+                "symbol": symbol,
+                "stop_price": triggered_at,
+                "current_price": current_price,
+                "quantity": float(pos.qty),
+                "entry_price": entry,
+                "stop_type": stop_type,
+            })
+            logger.warning(f"STOP LOSS TRIGGERED [{stop_type}]: {symbol} at ${current_price:.2f} (stop: ${triggered_at:.2f})")
 
         return stop_loss_triggers
 
@@ -219,7 +267,13 @@ class RiskManager:
         return expired
 
     def get_stop_loss_price(self, entry_price: float) -> float:
-        return round(entry_price * (1 + Config.TA_STOP_LOSS_PCT), 2)
+        return round(entry_price * (1 + Config.RISK_STOP_LOSS_PCT), 2)
+
+    def get_disaster_stop_price(self, entry_price: float) -> float:
+        """Bracket-order stop-leg level: the broker-side leg is a redundant
+        intraday backstop matching the software disaster stop, not the primary
+        exit (that's the close-window stop)."""
+        return round(entry_price * (1 + Config.RISK_INTRADAY_STOP_PCT), 2)
 
     def sync_from_alpaca(self, positions: list):
         """Populate risk-manager state from Alpaca positions for symbols not
@@ -235,10 +289,12 @@ class RiskManager:
                 try:
                     entry_price = float(pos.avg_entry_price)
                     qty = float(pos.qty)
-                    stop_loss = entry_price * (1 + Config.TA_STOP_LOSS_PCT)
+                    stop_loss = entry_price * (1 + Config.RISK_STOP_LOSS_PCT)
+                    disaster_stop = entry_price * (1 + Config.RISK_INTRADAY_STOP_PCT)
                     self.positions[symbol] = {
                         "entry_price": entry_price,
                         "stop_loss": stop_loss,
+                        "disaster_stop": disaster_stop,
                         "quantity": qty,
                         "date": now
                     }
@@ -267,5 +323,7 @@ class RiskManager:
             "remaining_capacity": max_trades - self.daily_trades,
             "distance_to_loss_limit": round(self.daily_pnl - daily_loss_limit, 2),
             "open_positions": len(self.positions),
-            "stop_loss_pct": Config.TA_STOP_LOSS_PCT
+            "stop_loss_pct": Config.RISK_STOP_LOSS_PCT,
+            "intraday_stop_pct": Config.RISK_INTRADAY_STOP_PCT,
+            "close_window_min": Config.RISK_CLOSE_WINDOW_MIN
         }

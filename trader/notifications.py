@@ -131,7 +131,7 @@ class NotificationManager:
 
     def notify_bot_startup(self, strategy_info: str = None, account_value: float = None):
         from .config import Config
-        stop_pct = abs(Config.TA_STOP_LOSS_PCT) * 100
+        stop_pct = abs(Config.RISK_STOP_LOSS_PCT) * 100
         if account_value is None:
             account_value = Config.SIMULATED_ACCOUNT_SIZE
         trading_capital = account_value * Config.TRADING_CAPITAL_ALLOCATION

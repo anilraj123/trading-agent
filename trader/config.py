@@ -28,7 +28,19 @@ class Config:
     RISK_DAILY_LOSS_LIMIT = float(os.getenv("RISK_DAILY_LOSS_LIMIT", "-5.00"))
     # Stop-loss fraction (negative). Falls back to legacy TA_STOP_LOSS_PCT for
     # backward compatibility with existing .env files; RISK_STOP_LOSS_PCT wins if set.
+    # Evaluated ONLY in the last RISK_CLOSE_WINDOW_MIN minutes of the session — the
+    # TA signal is daily-bar, and live fills 6/22–7/13 showed intraday -3% stop-outs
+    # were 0-for-11 (-$32.22) while multi-day holds were +$17.06: polling this stop
+    # intraday sold noise, not signal.
     RISK_STOP_LOSS_PCT = float(os.getenv("RISK_STOP_LOSS_PCT", os.getenv("TA_STOP_LOSS_PCT", "-0.03")))
+    # Disaster stop (negative), evaluated EVERY cycle. Wide enough that intraday
+    # noise never touches it; catches a genuine single-name collapse before the
+    # close window. Also the bracket-order stop-leg level for whole-share buys.
+    RISK_INTRADAY_STOP_PCT = float(os.getenv("RISK_INTRADAY_STOP_PCT", "-0.06"))
+    # Minutes before market close during which RISK_STOP_LOSS_PCT is evaluated.
+    # Must be >= TRADING_INTERVAL_MINUTES + worst-case cycle runtime (the schedule
+    # lib spaces runs at interval + job duration) so one cycle always lands inside.
+    RISK_CLOSE_WINDOW_MIN = int(os.getenv("RISK_CLOSE_WINDOW_MIN", "20"))
     # Voluntary-trade circuit breaker (forced exits — stops/expiry — don't count).
     # Defaults to 2x TARGET_POSITIONS so the bot can fully establish OR rotate its
     # book in a day (sell all + buy all) without freezing mid-rebalance, while still
