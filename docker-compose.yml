@@ -28,3 +28,29 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # trader_v2: thesis-driven bot, PAPER account only. The environment block
+  # overrides .env so v2 gets paper keys, isolated state (data/v2/), and its
+  # own ntfy topic — no source changes, no risk to the live bots.
+  trader-v2:
+    build: .
+    container_name: trader-v2
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: python -m trader_v2
+    environment:
+      ALPACA_API_KEY: ${ALPACA_PAPER_API_KEY}
+      ALPACA_SECRET_KEY: ${ALPACA_PAPER_SECRET_KEY}
+      ALPACA_BASE_URL: https://paper-api.alpaca.markets
+      DATA_DIR: /app/data/v2
+      NOTIFY_PROVIDER: ntfy
+      NOTIFY_NTFY_TOPIC: ${V2_NTFY_TOPIC:-trading-agent}
+      EMAIL_ENABLED: "false"
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
