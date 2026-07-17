@@ -21,6 +21,39 @@ COLUMNS_TRADE = ["timestamp", "date", "bot", "symbol", "action", "quantity", "en
 
 COLUMNS_DISCOVERY = ["timestamp", "watchlist_size", "universe_size", "gainers", "losers", "active"]
 
+
+def spy_buy_and_hold(deposits: list, closes: dict) -> tuple:
+    """Deposit-dated benchmark: what the account would be worth if every cash
+    movement had bought (or, for withdrawals, sold) SPY at that day's close.
+
+    deposits: [(date, amount)] — amount negative for withdrawals.
+    closes:   {date: close} of daily SPY closes covering the deposit range.
+    Returns (current_value, total_net_deposited). (0.0, 0.0) if inputs are
+    unusable — callers should skip the benchmark rather than show garbage.
+
+    A deposit on a non-trading day buys at the NEXT available close (the money
+    couldn't have been invested earlier). This is the honest comparison: SPY
+    return measured over the same dollars for the same days — NOT SPY's return
+    over some fixed window applied to the final balance, which overstates SPY
+    whenever deposits arrived later at higher prices (the pre-fix bug).
+    """
+    if not deposits or not closes:
+        return 0.0, 0.0
+    trading_days = sorted(closes)
+    shares = 0.0
+    uninvested = 0.0
+    total = 0.0
+    for dep_date, amount in sorted(deposits):
+        total += amount
+        buy_day = next((d for d in trading_days if d >= dep_date), None)
+        if buy_day is None:
+            # Deposit after the last known close (e.g. today, bar not printed
+            # yet) — couldn't have been invested; carries at face value.
+            uninvested += amount
+            continue
+        shares += amount / closes[buy_day]
+    return shares * closes[trading_days[-1]] + uninvested, total
+
 def save_daily_snapshot(bot: str, start_value: float, end_value: float, pnl: float, trades: int, wins: int, losses: int, total_deposited: float = None):
     _ensure_dir()
     file_exists = os.path.isfile(HISTORY_FILE)
@@ -381,7 +414,7 @@ def build_weekly_report(total_deposits, starting_account_value):
     return "\n".join(lines), len(llm_reports)
 
 
-def build_daily_report(today, start_value, end_value, daily_pnl, total_deposits, true_trading_pnl, trades_today, win_count, loss_count, positions, spy_return_pct, apy, spy_apy):
+def build_daily_report(today, start_value, end_value, daily_pnl, total_deposits, true_trading_pnl, trades_today, win_count, loss_count, positions, spy_return_pct, spy_value, alpha_pp):
     trades = _read_trades_since(today)
     llm_reports = _read_llm_reports_since(today)
     discovery = _read_discovery_since(today)
@@ -401,8 +434,11 @@ def build_daily_report(today, start_value, end_value, daily_pnl, total_deposits,
     lines.append(f"Day P&L:   ${daily_pnl:+.2f}")
     lines.append(f"Deposits:  ${total_deposits:.2f}")
     lines.append(f"Trading P&L: ${true_trading_pnl:+.2f}")
-    lines.append(f"Trades: {trades_today} ({win_count}W/{loss_count}L)")
-    lines.append(f"APY: {apy:+.2f}% | vs SPY APY: {spy_apy:+.2f}% | Edge: {apy - spy_apy:+.2f}%")
+    lines.append(f"Trades: {trades_today} (closed: {win_count}W/{loss_count}L)")
+    if alpha_pp is not None:
+        lines.append(f"SPY buy-&-hold (same deposits): {spy_return_pct:+.2f}% -> ${spy_value:.2f} | Alpha: {alpha_pp:+.2f} pp")
+    else:
+        lines.append("SPY benchmark unavailable today")
     lines.append("")
 
     closed_today = [t for t in trades if t.get("pnl_pct")]

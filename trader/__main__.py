@@ -17,7 +17,7 @@ from .risk_manager import RiskManager, in_close_window
 from .technical_analysis import TechnicalAnalysis
 from .stock_discovery import StockDiscovery
 from .notifications import NotificationManager
-from .tracker import save_daily_snapshot, save_trade, save_discovery_snapshot, generate_weekly_summary
+from .tracker import save_daily_snapshot, save_trade, save_discovery_snapshot, generate_weekly_summary, spy_buy_and_hold
 from .email_notifier import EmailNotifier
 
 logging.basicConfig(
@@ -391,31 +391,41 @@ class TradingBot:
             true_return_pct = (true_trading_pnl / max(principal_invested, 1)) * 100
             total_return_pct = ((current_value / max(principal_invested, 1)) - 1) * 100
             
-            days_elapsed = (datetime.now() - self.start_date).days
-
-            if days_elapsed > 0 and true_return_pct != 0:
-                apy = ((1 + true_return_pct / 100) ** (365 / max(1, days_elapsed)) - 1) * 100
-            else:
-                apy = 0
-
-            spy_bars = self.alpaca.get_bars('SPY', days=250, timeframe=TimeFrame(1, TimeFrameUnit.Day))
-            spy_apy = 0
-            spy_return_pct = 0
-            spy_value = self.starting_account_value
+            # SPY benchmark: deposit-dated buy-and-hold counterfactual — each cash
+            # movement (from Alpaca's own activities ledger) buys SPY at that
+            # day's close. The old version measured SPY over a flat 250-day
+            # window (predating the account) and applied it to the full balance,
+            # which wildly overstated SPY whenever deposits arrived later. APY
+            # is gone entirely: annualizing a weeks-old account (with days
+            # counted since the last *container restart*, no less) produced
+            # -100% / billions-of-% nonsense.
+            deposits = self.alpaca.get_cash_deposits()
+            if not deposits:
+                # Activities API unavailable: treat the whole principal as
+                # deposited on the first day of bar history we fetch below.
+                deposits = [(datetime.now().date() - timedelta(days=70), principal_invested)]
+            first_dep = min(d for d, _ in deposits)
+            lookback = max(60, (datetime.now().date() - first_dep).days + 10)
+            spy_bars = self.alpaca.get_bars('SPY', days=lookback, timeframe=TimeFrame(1, TimeFrameUnit.Day))
+            spy_value = spy_return_pct = alpha_pp = None
             if spy_bars is not None and len(spy_bars) > 1:
-                spy_start = spy_bars['close'].iloc[0]
-                spy_end = spy_bars['close'].iloc[-1]
-                spy_return_pct = ((spy_end / spy_start) - 1) * 100
-                if days_elapsed > 0:
-                    spy_apy = ((spy_end / spy_start) ** (365 / max(1, days_elapsed)) - 1) * 100
-                spy_value = self.starting_account_value * (1 + spy_return_pct / 100)
+                closes = {ts[1].date() if isinstance(ts, tuple) else ts.date(): float(c)
+                          for ts, c in spy_bars['close'].items()}
+                spy_value, spy_total = spy_buy_and_hold(deposits, closes)
+                if spy_total > 0:
+                    spy_return_pct = (spy_value / spy_total - 1) * 100
+                    alpha_pp = true_return_pct - spy_return_pct
 
-            edge = apy - spy_apy
             raw_positions = self.alpaca.get_positions()
             pos_count = len(raw_positions)
 
-            wins = len([t for t in self.risk.trade_log if t.get('pnl', 0) >= 0])
-            losses = len([t for t in self.risk.trade_log if t.get('pnl', 0) < 0])
+            # W/L over CLOSED trades only. The old count included BUY records
+            # (pnl defaults to 0 → counted as "wins"), so W+L never matched the
+            # trade count in the same message.
+            closed_today = [t for t in self.risk.trade_log if 'SELL' in t.get('action', '')]
+            buys_today = len([t for t in self.risk.trade_log if 'BUY' in t.get('action', '')])
+            wins = len([t for t in closed_today if t.get('pnl', 0) > 0])
+            losses = len([t for t in closed_today if t.get('pnl', 0) < 0])
             # Stock-only daily P&L: exclude options positions so theta decay doesn't
             # distort the stock bot's performance tracking. Options operate on a
             # completely different time horizon (7-35 DTE) and their daily P&L is
@@ -443,23 +453,30 @@ class TradingBot:
             self.email_notifier.send_daily_report(
                 self.day_start_value, current_value, daily_pnl, total_deposits,
                 true_trading_pnl, self.risk.daily_trades, wins, losses,
-                positions_dict, spy_return_pct, apy, spy_apy
+                positions_dict, spy_return_pct, spy_value, alpha_pp
             )
+
+            if alpha_pp is not None:
+                benchmark_block = (
+                    f"vs SPY buy-&-hold (same deposits, same dates):\n"
+                    f"SPY: {spy_return_pct:+.2f}% → ${spy_value:.2f}\n"
+                    f"Alpha: {alpha_pp:+.2f} pp ({'ahead of' if alpha_pp >= 0 else 'behind'} SPY)"
+                )
+            else:
+                benchmark_block = "vs SPY: benchmark unavailable (bars/deposits fetch failed)"
 
             # Fetch the regime mode that was set during the last cycle.
             regime_mode = getattr(self, '_last_regime_mode', 'normal')
             self.notif.send(
                 f"DAILY SUMMARY - {today.strftime('%b %d')}\n"
                 f"Portfolio: ${current_value:.2f}\n"
-                f"Deposits: ${total_deposits:.2f} | Trading P&L: ${true_trading_pnl:+.2f} | Return: {true_return_pct:+.2f}% | APY: {apy:+.2f}%\n"
+                f"Deposits: ${total_deposits:.2f} | Trading P&L: ${true_trading_pnl:+.2f} | Return: {true_return_pct:+.2f}%\n"
                 f"Open Positions: {pos_count}\n"
-                f"Today's Trades: {self.risk.daily_trades} (W:{wins}/L:{losses})\n"
+                f"Today: {buys_today} buys, {len(closed_today)} sells (W:{wins}/L:{losses})\n"
                 f"Day P&L: ${daily_pnl:+.2f}\n"
                 f"Regime: {regime_mode.upper()}\n"
                 f"\n"
-                f"vs SPY Buy & Hold ($200 invested):\n"
-                f"SPY Return: {spy_return_pct:+.2f}% | SPY Value: ${spy_value:.2f}\n"
-                f"{'Our APY' if edge >= 0 else 'SPY APY'} leads by {abs(edge):.2f}%"
+                f"{benchmark_block}"
             )
         except Exception as e:
             logger.error(f"Daily summary failed: {e}")
