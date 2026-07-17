@@ -182,9 +182,14 @@ class LLMEngine:
             self.last_usage = {}
 
     def call(self, system=None, messages=None, model=None, max_tokens=1500, temperature=0.1):
+        # temperature=None omits the parameter entirely — required for models
+        # that reject sampling params (claude-opus-4-8 and newer return 400 on
+        # any temperature). Default stays 0.1 for backward compatibility.
         model = model or Config.LLM_MODEL
         if Config.LLM_PROVIDER == "anthropic":
-            kwargs = dict(model=model, max_tokens=max_tokens, temperature=temperature)
+            kwargs = dict(model=model, max_tokens=max_tokens)
+            if temperature is not None:
+                kwargs["temperature"] = temperature
             if system:
                 kwargs["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
             kwargs["messages"] = messages or []
@@ -196,19 +201,23 @@ class LLMEngine:
             if system:
                 msgs.append({"role": "system", "content": system})
             msgs.extend(messages or [])
-            response = self.client.chat.completions.create(
-                model=model, messages=msgs, temperature=temperature, max_tokens=max_tokens
-            )
+            oa_kwargs = dict(model=model, messages=msgs, max_tokens=max_tokens)
+            if temperature is not None:
+                oa_kwargs["temperature"] = temperature
+            response = self.client.chat.completions.create(**oa_kwargs)
             self._record_usage(response, model)
             return response.choices[0].message.content.strip()
 
     def call_structured(self, tool_def, system=None, messages=None, model=None, max_tokens=1500, temperature=0.1):
+        # temperature=None omits the parameter (see call()).
         model = model or Config.LLM_MODEL
         if Config.LLM_PROVIDER == "anthropic":
             kwargs = dict(
-                model=model, max_tokens=max_tokens, temperature=temperature,
+                model=model, max_tokens=max_tokens,
                 tools=[tool_def], tool_choice={"type": "tool", "name": tool_def["name"]}
             )
+            if temperature is not None:
+                kwargs["temperature"] = temperature
             if system:
                 kwargs["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
             kwargs["messages"] = messages or []
@@ -224,9 +233,10 @@ class LLMEngine:
             if system:
                 msgs.append({"role": "system", "content": system + "\n\nRespond in JSON only."})
             msgs.extend(messages or [])
-            response = self.client.chat.completions.create(
-                model=model, messages=msgs, temperature=temperature, max_tokens=max_tokens
-            )
+            oa_kwargs = dict(model=model, messages=msgs, max_tokens=max_tokens)
+            if temperature is not None:
+                oa_kwargs["temperature"] = temperature
+            response = self.client.chat.completions.create(**oa_kwargs)
             self._record_usage(response, model)
             raw = response.choices[0].message.content.strip()
             try:
