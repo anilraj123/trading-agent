@@ -777,3 +777,57 @@ class TestSyncTrailMerge:
         rm.sync_from_alpaca([self._alpaca_pos(symbol="AAA")])
         assert "GONE" not in rm.position_trail
         assert "AAA" in rm.position_trail
+
+
+class TestSpyBuyAndHold:
+    """Deposit-dated SPY benchmark (trader/tracker.py). The old summary applied
+    SPY's 250-day return to the whole balance — this replaces it."""
+
+    CLOSES = {
+        date(2026, 5, 7): 680.0,
+        date(2026, 5, 8): 682.0,
+        date(2026, 5, 11): 690.0,
+        date(2026, 5, 18): 700.0,
+        date(2026, 7, 15): 750.0,
+    }
+
+    def test_single_deposit(self):
+        from trader.tracker import spy_buy_and_hold
+        value, total = spy_buy_and_hold([(date(2026, 5, 7), 680.0)], self.CLOSES)
+        assert total == 680.0
+        assert value == 750.0  # exactly 1 share, valued at the last close
+
+    def test_staged_deposits_weighted_by_entry_price(self):
+        from trader.tracker import spy_buy_and_hold
+        deps = [(date(2026, 5, 7), 200.0), (date(2026, 5, 11), 200.0), (date(2026, 5, 18), 950.0)]
+        value, total = spy_buy_and_hold(deps, self.CLOSES)
+        assert total == 1350.0
+        expected = (200/680.0 + 200/690.0 + 950/700.0) * 750.0
+        assert abs(value - expected) < 1e-9
+        # later deposits at higher prices => less than "everything at day 1"
+        assert value < (1350/680.0) * 750.0
+
+    def test_weekend_deposit_buys_next_close(self):
+        from trader.tracker import spy_buy_and_hold
+        # 5/9 is between the 5/8 and 5/11 closes -> buys at 690, not 682
+        value, _ = spy_buy_and_hold([(date(2026, 5, 9), 690.0)], self.CLOSES)
+        assert value == 750.0
+
+    def test_withdrawal_sells_shares(self):
+        from trader.tracker import spy_buy_and_hold
+        deps = [(date(2026, 5, 7), 680.0), (date(2026, 5, 18), -700.0)]  # buy 1 sh, sell 1 sh
+        value, total = spy_buy_and_hold(deps, self.CLOSES)
+        assert abs(value - 0.0) < 1e-9
+        assert total == -20.0
+
+    def test_deposit_after_last_close_carries_at_face_value(self):
+        from trader.tracker import spy_buy_and_hold
+        deps = [(date(2026, 5, 7), 680.0), (date(2026, 7, 16), 100.0)]
+        value, total = spy_buy_and_hold(deps, self.CLOSES)
+        assert value == 750.0 + 100.0
+        assert total == 780.0
+
+    def test_empty_inputs_fail_soft(self):
+        from trader.tracker import spy_buy_and_hold
+        assert spy_buy_and_hold([], self.CLOSES) == (0.0, 0.0)
+        assert spy_buy_and_hold([(date(2026, 5, 7), 100.0)], {}) == (0.0, 0.0)

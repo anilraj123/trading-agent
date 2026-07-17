@@ -179,7 +179,7 @@ class EmailNotifier:
 
         threading.Thread(target=_send, daemon=True).start()
 
-    def send_daily_report(self, start_value, end_value, daily_pnl, total_deposits, true_trading_pnl, trades_today, win_count, loss_count, positions, spy_return_pct, apy, spy_apy):
+    def send_daily_report(self, start_value, end_value, daily_pnl, total_deposits, true_trading_pnl, trades_today, win_count, loss_count, positions, spy_return_pct, spy_value, alpha_pp):
         if not self.enabled:
             return
 
@@ -190,7 +190,7 @@ class EmailNotifier:
                 today = datetime.now()
                 report_body, num_reports = build_daily_report(
                     today, start_value, end_value, daily_pnl, total_deposits, true_trading_pnl,
-                    trades_today, win_count, loss_count, positions, spy_return_pct, apy, spy_apy
+                    trades_today, win_count, loss_count, positions, spy_return_pct, spy_value, alpha_pp
                 )
                 timestamp = today.strftime("%Y%m%d_%H%M%S")
                 subject = f"Daily Trading Summary - {today.strftime('%Y-%m-%d')}"

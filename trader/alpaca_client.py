@@ -170,3 +170,30 @@ class AlpacaClient:
     def get_daily_pl(self):
         acct = self.get_account()
         return float(acct.equity) - float(acct.last_equity)
+
+    def get_cash_deposits(self) -> list:
+        """All executed cash movements (deposits positive, withdrawals negative)
+        as [(date, amount)], ascending. Authoritative source for the SPY
+        buy-and-hold benchmark — replaces guessing the deposit schedule from
+        equity jumps. Returns [] on any failure so callers can fall back."""
+        import requests
+        try:
+            resp = requests.get(
+                f"{Config.ALPACA_BASE_URL}/v2/account/activities",
+                headers={
+                    "APCA-API-KEY-ID": Config.ALPACA_API_KEY,
+                    "APCA-API-SECRET-KEY": Config.ALPACA_SECRET_KEY,
+                },
+                params={"activity_types": "CSD,CSW,TRANS", "direction": "asc", "page_size": 100},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            out = []
+            for a in resp.json():
+                if a.get("status") and a["status"] != "executed":
+                    continue
+                out.append((datetime.fromisoformat(a["date"]).date(), float(a["net_amount"])))
+            return out
+        except Exception as e:
+            logger.warning(f"get_cash_deposits failed ({e}); benchmark will fall back")
+            return []
