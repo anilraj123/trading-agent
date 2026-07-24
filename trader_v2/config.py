@@ -35,7 +35,10 @@ class V2Config:
     CYCLE_MINUTES = int(os.getenv("V2_CYCLE_MINUTES", "15"))
 
     # --- research -----------------------------------------------------------
-    RESEARCH_MODEL = os.getenv("V2_RESEARCH_MODEL", "claude-sonnet-4-6")
+    # Sonnet 5: better analyst, intro pricing ($2/$10 per MTok) through 2026-08-31.
+    # NOTE: Sonnet 5 rejects non-default sampling params — every call site must
+    # pass temperature=None (llm_engine omits the kwarg for None).
+    RESEARCH_MODEL = os.getenv("V2_RESEARCH_MODEL", "claude-sonnet-5")
     WEEKLY_MODEL = os.getenv("V2_WEEKLY_MODEL", "claude-opus-4-8")
     RESEARCH_CANDIDATES = int(os.getenv("V2_RESEARCH_CANDIDATES", "12"))
     NEWS_PER_SYMBOL = int(os.getenv("V2_NEWS_PER_SYMBOL", "5"))

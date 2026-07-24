@@ -188,12 +188,18 @@ def daily_loss_halted(equity: float, last_equity: float, halt_pct: float) -> boo
 # Transitions
 # --------------------------------------------------------------------------
 
-def apply_fill(t: dict, fill_price: float, qty: float, order_id) -> dict:
+def apply_fill(t: dict, fill_price: float, qty: float, order_id, today: date = None) -> dict:
     if t["status"] != "active":
         raise ValueError(f"cannot enter thesis {t['id']} in status {t['status']}")
+    today = today or datetime.now(timezone.utc).date()
     t.update(status="entered", entered_at=_now_iso(), entry_price=float(fill_price),
              qty=float(qty), order_id=str(order_id) if order_id else None,
-             hwm=float(fill_price), trailing=False)
+             hwm=float(fill_price), trailing=False,
+             # TTL clock restarts at FILL: the pre-entry TTL decays unfilled
+             # zones; once entered, the position gets its full ttl_days to play
+             # out (CSW 7/21: written Fri, filled Mon, expired Tue = 1 day of
+             # runway — a clock artifact, not a thesis judgment).
+             expires=(today + timedelta(days=t["ttl_days"])).isoformat())
     return t
 
 
