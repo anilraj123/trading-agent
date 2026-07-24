@@ -205,8 +205,17 @@ class TestTrail:
 class TestTransitions:
     def test_fill_sets_state(self):
         t = th.build_thesis(raw_thesis(), TODAY)
-        th.apply_fill(t, 175.0, 1.9, "oid")
+        th.apply_fill(t, 175.0, 1.9, "oid", today=TODAY)
         assert t["status"] == "entered" and t["hwm"] == 175.0 and t["qty"] == 1.9
+
+    def test_fill_restarts_ttl_clock(self):
+        # thesis written Fri with 5-day TTL; filled 3 days later -> expires
+        # ttl_days AFTER THE FILL, not after creation (the CSW 1-day artifact)
+        t = th.build_thesis(raw_thesis(ttl_days=5), TODAY)
+        assert t["expires"] == "2026-07-22"
+        fill_day = date(2026, 7, 20)
+        th.apply_fill(t, 175.0, 1.9, "oid", today=fill_day)
+        assert t["expires"] == "2026-07-25"
 
     def test_double_entry_refused(self):
         t = make_entered(100.0)

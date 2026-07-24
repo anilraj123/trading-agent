@@ -158,7 +158,8 @@ def run_postmortem(llm, notif):
             f"CLOSED TRADES SINCE LAST REVIEW:\n{json.dumps(trades, indent=1)}")
     result = llm.call_structured(POSTMORTEM_TOOL, system=system,
                                  messages=[{"role": "user", "content": user}],
-                                 model=V2Config.RESEARCH_MODEL, max_tokens=1000)
+                                 model=V2Config.RESEARCH_MODEL, max_tokens=1000,
+                                 temperature=None)
     today_iso = datetime.now(timezone.utc).date().isoformat()
     if isinstance(result, dict) and "lessons" in result:
         for item in result["lessons"][:3]:
@@ -298,7 +299,8 @@ def run_nightly(alpaca, llm, discovery, notif):
     system = _system_prompt(store.read_lessons())
     result = llm.call_structured(RESEARCH_TOOL, system=system,
                                  messages=[{"role": "user", "content": user}],
-                                 model=V2Config.RESEARCH_MODEL, max_tokens=3000)
+                                 model=V2Config.RESEARCH_MODEL, max_tokens=3000,
+                                 temperature=None)
     log_llm_call("v2_research", llm.last_model or V2Config.RESEARCH_MODEL, system, user,
                  json.dumps(result, default=str), usage=llm.last_usage,
                  parse_ok=isinstance(result, dict) and "error" not in result)
