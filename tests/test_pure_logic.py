@@ -39,7 +39,7 @@ os.environ["RISK_TRAIL_STOP_PCT"] = "-0.03"
 from trader.config import Config
 from trader.technical_analysis import TechnicalAnalysis
 from trader.llm_engine import _max_position_size, needs_llm_review
-from trader.risk_manager import RiskManager, in_close_window
+from trader.risk_manager import RiskManager, in_close_window, in_open_window
 
 # Import options bot pure functions by patching heavy deps at module level
 from unittest.mock import patch
@@ -477,6 +477,36 @@ class TestCloseWindow:
         assert in_close_window(SimpleNamespace(is_open=True, timestamp=None, next_close=None), 20) is False
 
 
+class TestOpenWindow:
+    """in_open_window (trader/risk_manager.py) — gates the disaster stop for
+    RISK_OPEN_WINDOW_MIN minutes after the session's own open, using a
+    bot-tracked timestamp rather than Alpaca's clock (next_open points at the
+    *next* session once the market is already open)."""
+
+    def test_inside_window_true(self):
+        opened = datetime(2026, 7, 30, 13, 30)
+        now = datetime(2026, 7, 30, 13, 42)  # 12 min after open
+        assert in_open_window(opened, now, 15) is True
+
+    def test_outside_window_false(self):
+        opened = datetime(2026, 7, 30, 13, 30)
+        now = datetime(2026, 7, 30, 13, 50)  # 20 min after open
+        assert in_open_window(opened, now, 15) is False
+
+    def test_boundary_exact_window(self):
+        opened = datetime(2026, 7, 30, 13, 30)
+        now = datetime(2026, 7, 30, 13, 45)  # exactly 15 min
+        assert in_open_window(opened, now, 15) is True
+
+    def test_unknown_session_open_fails_closed(self):
+        # No tracked open time (e.g. bot started mid-session) — the disaster stop
+        # must evaluate normally, not be silently disabled all day.
+        assert in_open_window(None, datetime(2026, 7, 30, 13, 42), 15) is False
+
+    def test_missing_now_fails_closed(self):
+        assert in_open_window(datetime(2026, 7, 30, 13, 30), None, 15) is False
+
+
 class TestTwoTierStops:
     """check_stop_losses two-tier behavior: disaster stop every call, regular
     stop only when close_window=True."""
@@ -531,6 +561,22 @@ class TestTwoTierStops:
         triggers = rm.check_stop_losses(self._pos(93.0), close_window=False)
         assert len(triggers) == 1
         assert triggers[0]["stop_type"] == "intraday_disaster"
+
+    def test_disaster_suppressed_in_open_window(self):
+        # An overnight gap that would trip the disaster stop is held during the
+        # opening window — same daily-bar-discipline reasoning as the close window.
+        assert self._rm().check_stop_losses(self._pos(93.0), close_window=False, open_window=True) == []
+
+    def test_disaster_fires_after_open_window(self):
+        triggers = self._rm().check_stop_losses(self._pos(93.0), close_window=False, open_window=False)
+        assert len(triggers) == 1
+        assert triggers[0]["stop_type"] == "intraday_disaster"
+
+    def test_open_window_default_false_backward_compatible(self):
+        # Callers that don't pass open_window (old call sites, other tests) keep
+        # the disaster stop firing unconditionally.
+        triggers = self._rm().check_stop_losses(self._pos(93.0), close_window=False)
+        assert len(triggers) == 1
 
     def test_position_price_fallback_chain(self):
         from types import SimpleNamespace
@@ -696,6 +742,51 @@ class TestTrailingStop:
         rm = _trail_rm()
         rm.unregister_position("AAA")
         assert "AAA" not in rm.position_trail
+
+
+class TestStopCooldown:
+    """mark_stopped_out / is_cooling_down — same-day rebuy block after ANY stop
+    (disaster/close/trailing), reset with the other daily counters."""
+
+    def _rm(self, tmp_path):
+        import trader.risk_manager as rmmod
+        rmmod.STATE_FILE = str(tmp_path / "risk_state.json")
+        return RiskManager()
+
+    def test_symbol_blocked_after_stop(self, tmp_path):
+        rm = self._rm(tmp_path)
+        assert rm.is_cooling_down("MO") is False
+        rm.mark_stopped_out("MO")
+        assert rm.is_cooling_down("MO") is True
+
+    def test_other_symbols_unaffected(self, tmp_path):
+        rm = self._rm(tmp_path)
+        rm.mark_stopped_out("MO")
+        assert rm.is_cooling_down("PFSI") is False
+
+    def test_resets_on_new_day(self, tmp_path):
+        rm = self._rm(tmp_path)
+        rm.mark_stopped_out("MO")
+        rm.last_reset_date = date(2020, 1, 1)  # force a "new day" on next check
+        assert rm.is_cooling_down("MO") is False
+
+    def test_roundtrips_through_state_file(self, tmp_path):
+        import trader.risk_manager as rmmod
+        rmmod.STATE_FILE = str(tmp_path / "risk_state.json")
+        rm = RiskManager()
+        rm.mark_stopped_out("MO")
+        rm2 = RiskManager()
+        assert rm2.is_cooling_down("MO") is True
+
+    def test_legacy_state_file_without_cooldown_key(self, tmp_path):
+        import json as _json
+        path = tmp_path / "risk_state.json"
+        with open(path, "w") as f:
+            _json.dump({"daily_trades": 2}, f)
+        import trader.risk_manager as rmmod
+        rmmod.STATE_FILE = str(path)
+        rm = RiskManager()
+        assert rm.stopped_out_today == set()
 
 
 class TestTrailStatePersistence:
