@@ -23,6 +23,21 @@ def in_close_window(clock, window_minutes: int) -> bool:
     except (AttributeError, TypeError):
         return False
 
+def in_open_window(session_open_time, now, window_minutes: int) -> bool:
+    """True when `now` is within window_minutes of `session_open_time` — the
+    timestamp the bot recorded at this session's closed->open transition. Unlike
+    in_close_window this can't be derived from Alpaca's clock alone (next_open
+    refers to the *next* session once the market is already open), so the caller
+    tracks the session's own open time and passes it in.
+    Fails closed (False) when session_open_time is unknown: the disaster stop
+    then evaluates normally, same as before this gate existed."""
+    if session_open_time is None or now is None:
+        return False
+    try:
+        return (now - session_open_time).total_seconds() <= window_minutes * 60
+    except TypeError:
+        return False
+
 class RiskManager:
     def __init__(self):
         self.daily_trades = 0
@@ -43,6 +58,12 @@ class RiskManager:
         # in *trading* days rather than calendar days. Refreshed daily by the bot from
         # Alpaca's calendar; empty list ⇒ weekends-only (still excludes Sat/Sun).
         self.market_holidays: list[date] = []
+        # Symbols that hit a stop (disaster/close/trailing) TODAY. Blocks rebuying
+        # for the rest of the session — a stop-loss firing and then the LLM
+        # re-entering the same name hours later on the same signal defeats the
+        # stop (live case: MO disaster-stopped 2026-07-30 9:42am, rebought 3x that
+        # afternoon). Reset daily alongside the other daily counters.
+        self.stopped_out_today: set[str] = set()
         self._load_state()
 
     def _state_path(self):
@@ -62,6 +83,7 @@ class RiskManager:
                     sym: dt.isoformat() for sym, dt in self.position_entry_dates.items()
                 },
                 "position_trail": self.position_trail,
+                "stopped_out_today": sorted(self.stopped_out_today),
             }
             with open(path, "w") as f:
                 json.dump(state, f)
@@ -86,6 +108,8 @@ class RiskManager:
             }
             # Missing key (pre-trailing state file) loads cleanly as {}.
             self.position_trail = state.get("position_trail", {})
+            # Missing key (pre-cooldown state file) loads cleanly as set().
+            self.stopped_out_today = set(state.get("stopped_out_today", []))
             logger.info(f"Loaded risk state: {self.daily_trades} trades, ${self.daily_pnl:.2f} P&L, {len(self.position_entry_dates)} entry dates")
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
             pass
@@ -96,6 +120,7 @@ class RiskManager:
             self.daily_trades = 0
             self.daily_pnl = 0.0
             self.trade_log = []
+            self.stopped_out_today = set()
             self.last_reset_date = date.today()
             self._save_state()
 
@@ -196,12 +221,17 @@ class RiskManager:
         qty = float(pos.qty)
         return float(pos.market_value) / qty if qty > 0 else 0.0
 
-    def check_stop_losses(self, current_positions: list, close_window: bool = False) -> list:
+    def check_stop_losses(self, current_positions: list, close_window: bool = False, open_window: bool = False) -> list:
         """Two-tier stops. The disaster stop (RISK_INTRADAY_STOP_PCT) fires on
-        every call; the regular stop (RISK_STOP_LOSS_PCT) fires only when
-        close_window=True — the TA signal is daily-bar, so realizing the -3%
-        stop on intraday prints sold noise, not signal (0-for-11 live). At most
-        one trigger per symbol; disaster takes precedence."""
+        every call EXCEPT during the opening window (open_window=True) — a
+        position that gapped down overnight can print its most extreme price in
+        the first minute or two of the next session on thin opening-auction
+        liquidity, and that gap is exactly the kind of intraday noise the
+        close-window deferral already treats specially for the regular stop. The
+        regular stop (RISK_STOP_LOSS_PCT) fires only when close_window=True — the
+        TA signal is daily-bar, so realizing the -3% stop on intraday prints sold
+        noise, not signal (0-for-11 live). At most one trigger per symbol;
+        disaster takes precedence."""
         stop_loss_triggers = []
         for pos in current_positions:
             symbol = pos.symbol
@@ -215,7 +245,7 @@ class RiskManager:
             if current_price <= 0:
                 continue
 
-            if current_price <= disaster_price:
+            if current_price <= disaster_price and not open_window:
                 stop_type = "intraday_disaster"
                 triggered_at = disaster_price
             elif close_window and current_price <= stop_price:
@@ -292,6 +322,18 @@ class RiskManager:
 
     def is_trailing(self, symbol: str) -> bool:
         return self.position_trail.get(symbol, {}).get("trailing", False)
+
+    def mark_stopped_out(self, symbol: str):
+        """Call after a stop (disaster, close-window, or trailing) closes a
+        position. Blocks the LLM from rebuying `symbol` for the rest of the
+        trading day — see stopped_out_today docstring in __init__."""
+        self.reset_if_new_day()
+        self.stopped_out_today.add(symbol)
+        self._save_state()
+
+    def is_cooling_down(self, symbol: str) -> bool:
+        self.reset_if_new_day()
+        return symbol in self.stopped_out_today
 
     def record_trade(self, symbol: str, action: str, quantity: float, price: float, pnl: float = 0, pnl_dollars: float = 0, strategy: str = "unknown", counts_toward_daily_cap: bool = True):
         # `pnl` is the percentage gain/loss on this trade (used for the wins/losses
@@ -427,5 +469,6 @@ class RiskManager:
             "trailing_positions": sum(1 for s in self.positions if self.is_trailing(s)),
             "stop_loss_pct": Config.RISK_STOP_LOSS_PCT,
             "intraday_stop_pct": Config.RISK_INTRADAY_STOP_PCT,
-            "close_window_min": Config.RISK_CLOSE_WINDOW_MIN
+            "close_window_min": Config.RISK_CLOSE_WINDOW_MIN,
+            "cooldown_symbols": sorted(self.stopped_out_today),
         }

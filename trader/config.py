@@ -37,6 +37,16 @@ class Config:
     # noise never touches it; catches a genuine single-name collapse before the
     # close window. Also the bracket-order stop-leg level for whole-share buys.
     RISK_INTRADAY_STOP_PCT = float(os.getenv("RISK_INTRADAY_STOP_PCT", "-0.06"))
+    # Minutes after market open during which the disaster stop is NOT evaluated.
+    # A position bought late in one session that gaps down overnight can print its
+    # most extreme price in the first minute or two of the next session (thin
+    # opening-auction liquidity), tripping the disaster stop on noise rather than a
+    # settled price — the same daily-bar-discipline reasoning that defers the
+    # regular stop to the close window, applied symmetrically to the open. Real
+    # collapses are still caught: the disaster stop evaluates normally on the very
+    # next cycle once this window elapses. (Live case: MANH/MO/ZWS 2026-07-30, all
+    # tripped ~12 min after open on overnight gaps, -$19.72 combined.)
+    RISK_OPEN_WINDOW_MIN = int(os.getenv("RISK_OPEN_WINDOW_MIN", "15"))
     # Minutes before market close during which RISK_STOP_LOSS_PCT is evaluated.
     # Must be >= TRADING_INTERVAL_MINUTES + worst-case cycle runtime (the schedule
     # lib spaces runs at interval + job duration) so one cycle always lands inside.

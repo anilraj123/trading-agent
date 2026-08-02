@@ -13,7 +13,7 @@ from rich.panel import Panel
 from .config import Config
 from .alpaca_client import AlpacaClient
 from .llm_engine import LLMEngine, needs_llm_review
-from .risk_manager import RiskManager, in_close_window
+from .risk_manager import RiskManager, in_close_window, in_open_window
 from .technical_analysis import TechnicalAnalysis
 from .stock_discovery import StockDiscovery
 from .notifications import NotificationManager
@@ -45,6 +45,12 @@ class TradingBot:
         self.running = False
         self.watchlist = list(self.discovery.discovered_stocks)
         self.last_market_state = False
+        # Timestamp of this session's closed->open transition, used to gate the
+        # disaster stop's opening window (see risk_manager.in_open_window). Same
+        # restart caveat as day_start_value below: a restart mid-session is
+        # indistinguishable from a real open here and re-arms a fresh grace
+        # window, but restarts are rare and the window is short (15 min default).
+        self.session_open_time = None
         self.cycle_count = 0
         self.status_interval = 4
         self.start_date = datetime.now()
@@ -139,6 +145,7 @@ class TradingBot:
             if market_open:
                 self.notif.notify_market_open()
                 self.day_start_value = self.account_value
+                self.session_open_time = datetime.now()
                 logger.info("Market opened - starting daily tracking")
             else:
                 self.notif.notify_market_close()
@@ -198,7 +205,8 @@ class TradingBot:
                     logger.debug(f"paused-cycle logging failed: {e}")
                 return
 
-            stop_loss_orders = self.risk.check_stop_losses(positions, close_window=close_window)
+            open_window = in_open_window(self.session_open_time, datetime.now(), Config.RISK_OPEN_WINDOW_MIN)
+            stop_loss_orders = self.risk.check_stop_losses(positions, close_window=close_window, open_window=open_window)
             # Symbols force-closed this cycle: the LLM must not rebuy them below
             # (the close order may not even be filled yet).
             exited_this_cycle = set()
@@ -208,6 +216,9 @@ class TradingBot:
                 # second stop on a position that's already been closed.
                 self.risk.unregister_position(order["symbol"])
                 exited_this_cycle.add(order["symbol"])
+                # Same-day cooldown: block the LLM from rebuying this symbol for the
+                # rest of the session (see mark_stopped_out docstring).
+                self.risk.mark_stopped_out(order["symbol"])
                 pnl_pct = (order["current_price"] - order["entry_price"]) / order["entry_price"] * 100
                 dollar_pnl = (order["current_price"] - order["entry_price"]) * order["quantity"]
                 self.risk.total_realized_pnl += dollar_pnl
@@ -229,6 +240,7 @@ class TradingBot:
                 self.alpaca.close_position(order["symbol"])
                 self.risk.unregister_position(order["symbol"])
                 exited_this_cycle.add(order["symbol"])
+                self.risk.mark_stopped_out(order["symbol"])
                 pnl_pct = (order["current_price"] - order["entry_price"]) / order["entry_price"] * 100
                 dollar_pnl = (order["current_price"] - order["entry_price"]) * order["quantity"]
                 self.risk.total_realized_pnl += dollar_pnl
@@ -295,7 +307,7 @@ class TradingBot:
                 if "error" in decisions:
                     self.notif.send(f"LLM parse error: {decisions.get('summary')}", priority="high")
                 try:
-                    actions_taken = self._execute_decisions(decisions, portfolio, skip_symbols=exited_this_cycle)
+                    actions_taken = self._execute_decisions(decisions, portfolio, skip_symbols=exited_this_cycle, cooldown_symbols=self.risk.stopped_out_today)
                 except Exception as e:
                     logger.error(f"Executing decisions failed (LLM report still sent): {e}")
                     actions_taken = []
@@ -618,12 +630,18 @@ class TradingBot:
             "stock_deployment_at_cap": stock_mv >= max_stock_deploy * 0.95
         }
 
-    def _execute_decisions(self, decisions: dict, portfolio: dict, skip_symbols: set = None) -> list:
+    def _execute_decisions(self, decisions: dict, portfolio: dict, skip_symbols: set = None, cooldown_symbols: set = None) -> list:
         action_results = []
         # Symbols force-exited earlier in this same cycle (stop/expiry). Their
         # close orders may not be filled yet, so a rebuy could double up — and
         # rebuying a name the risk layer just ejected defeats the ejection.
         skip_symbols = skip_symbols or set()
+        # Symbols that hit ANY stop (disaster/close/trailing) earlier TODAY, not
+        # just this cycle — blocks the LLM from re-averaging into a name hours
+        # after getting stopped out of it on the same signal (live case:
+        # 2026-07-30, MO disaster-stopped at the open then bought back 3x that
+        # afternoon). Separate from skip_symbols so the two get distinct reasons.
+        cooldown_symbols = cooldown_symbols or set()
 
         # Total stock deployment cap: keep total stock market value under N% of the
         # equity bot's footprint (cash already held + stock already held ≈ its equity).
@@ -654,6 +672,11 @@ class TradingBot:
             if sym_upper in skip_symbols:
                 logger.info(f"Skipping {symbol} - force-exited earlier this cycle")
                 action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": 0, "status": "rejected", "reason": "Force-exited this cycle"})
+                continue
+
+            if action == "BUY" and sym_upper in cooldown_symbols:
+                logger.info(f"Skipping BUY {symbol} - stopped out earlier today (same-day cooldown)")
+                action_results.append({"symbol": symbol, "action": action, "quantity": quantity, "price": 0, "status": "rejected", "reason": "Same-day cooldown after stop-out"})
                 continue
 
             if sym_upper in Config.BLACKLIST:
