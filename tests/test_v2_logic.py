@@ -304,3 +304,149 @@ class TestLessonsBounding:
             assert store.read_lessons() == ""
         finally:
             store.LESSONS_FILE = orig
+
+# ---------------------------------------------------------------------------
+# Schema v2: direction, catalyst_date, instrument policy (overhaul PR2)
+# ---------------------------------------------------------------------------
+
+def bearish_thesis(**over):
+    base = dict(symbol="NVDA", direction="bearish", conviction=4,
+                entry_zone_low=172.0, entry_zone_high=178.5,
+                invalidation_price=185.0, price_target=155.0,
+                catalyst="earnings miss 8/14", catalyst_date="2026-07-20",
+                ttl_days=5, reasoning="test")
+    base.update(over)
+    return base
+
+
+class TestDirectionValidation:
+    def _ok(self, raw, close=175.0):
+        return th.validate_new_thesis(raw, close, CANDIDATES, set(),
+                                      today=TODAY, opt_min_conviction=4)
+
+    def test_bullish_default_direction(self):
+        t = th.build_thesis(raw_thesis(), TODAY)
+        assert t["direction"] == "bullish" and t["multiplier"] == 1
+        assert t["instrument"] is None and t["option"] is None
+
+    def test_bad_direction_rejected(self):
+        assert "bad direction" in self._ok(raw_thesis(direction="sideways"))
+
+    def test_bearish_happy_path(self):
+        assert self._ok(bearish_thesis()) is None
+
+    def test_bearish_inverted_geometry_enforced(self):
+        assert "must be above zone high" in self._ok(bearish_thesis(invalidation_price=170.0))
+        assert "must be below zone low" in self._ok(bearish_thesis(price_target=180.0))
+        assert "above zone" in self._ok(bearish_thesis(invalidation_price=210.0))  # >15% above
+
+    def test_bearish_requires_conviction_bar(self):
+        assert "conviction >= 4" in self._ok(bearish_thesis(conviction=3))
+
+    def test_bearish_requires_catalyst_date(self):
+        assert "dated catalyst" in self._ok(bearish_thesis(catalyst_date=None))
+        assert "dated catalyst" in self._ok(bearish_thesis(catalyst_date=""))
+
+    def test_catalyst_date_unparseable(self):
+        assert "unparseable" in self._ok(raw_thesis(catalyst_date="next tuesday"))
+
+    def test_catalyst_date_outside_ttl_window(self):
+        assert "outside" in self._ok(raw_thesis(catalyst_date="2026-09-01", ttl_days=5))
+        assert "outside" in self._ok(raw_thesis(catalyst_date="2026-07-01"))  # in the past
+
+    def test_catalyst_date_inside_window_ok(self):
+        assert self._ok(raw_thesis(catalyst_date="2026-07-20", ttl_days=5)) is None
+
+    def test_bullish_without_catalyst_date_still_fine(self):
+        assert self._ok(raw_thesis()) is None
+
+
+class TestChooseInstrument:
+    KW = dict(opt_enabled=True, min_conviction=4, min_premium=50.0)
+
+    def _active(self, **over):
+        t = th.build_thesis(raw_thesis(catalyst_date="2026-07-20"), TODAY)
+        t.update(over)
+        return t
+
+    def test_high_conviction_dated_catalyst_gets_option(self):
+        inst, why = th.choose_instrument(self._active(), TODAY, 2, 300.0, **self.KW)
+        assert (inst, why) == ("option", None)
+
+    def test_disabled_falls_to_shares(self):
+        kw = dict(self.KW, opt_enabled=False)
+        assert th.choose_instrument(self._active(), TODAY, 2, 300.0, **kw) == ("shares", "options_disabled")
+
+    def test_level_below_2(self):
+        assert th.choose_instrument(self._active(), TODAY, 1, 300.0, **self.KW) == ("shares", "options_level")
+
+    def test_conviction_below_bar(self):
+        t = self._active(conviction=3)
+        assert th.choose_instrument(t, TODAY, 2, 300.0, **self.KW) == ("shares", "conviction_below_bar")
+
+    def test_no_catalyst_date(self):
+        t = self._active(catalyst_date=None)
+        assert th.choose_instrument(t, TODAY, 2, 300.0, **self.KW) == ("shares", "no_catalyst_date")
+
+    def test_catalyst_past_window(self):
+        t = self._active(catalyst_date="2026-07-10")  # before TODAY
+        assert th.choose_instrument(t, TODAY, 2, 300.0, **self.KW) == ("shares", "catalyst_outside_window")
+
+    def test_sleeve_full(self):
+        assert th.choose_instrument(self._active(), TODAY, 2, 49.0, **self.KW) == ("shares", "sleeve_full")
+
+    def test_bearish_skips_instead_of_shares(self):
+        t = self._active(direction="bearish", conviction=3)
+        assert th.choose_instrument(t, TODAY, 2, 300.0, **self.KW) == ("skip", "conviction_below_bar")
+
+    def test_bearish_gets_put_policy_pass(self):
+        t = self._active(direction="bearish")
+        assert th.choose_instrument(t, TODAY, 2, 300.0, **self.KW) == ("option", None)
+
+
+class TestSleeveRoom:
+    def test_empty_book_full_room(self):
+        assert th.sleeve_room([], 1000.0, 0.35) == 350.0
+
+    def test_open_option_consumes(self):
+        opt_pos = make_entered(entry=2.40, qty=1.0, instrument="option", multiplier=100)
+        assert th.sleeve_room([opt_pos], 1000.0, 0.35) == 350.0 - 240.0
+
+    def test_shares_do_not_consume(self):
+        eq = make_entered(entry=100.0, qty=3.0, instrument="shares", multiplier=1)
+        assert th.sleeve_room([eq], 1000.0, 0.35) == 350.0
+
+    def test_floor_at_zero(self):
+        opt_pos = make_entered(entry=5.0, qty=1.0, instrument="option", multiplier=100)
+        assert th.sleeve_room([opt_pos], 1000.0, 0.35) == 0.0
+
+
+class TestStoreMigration:
+    def test_legacy_active_thesis_stamped(self):
+        import trader_v2.store as store
+        legacy = {"id": "T-X", "symbol": "NVDA", "status": "active"}
+        m = store._migrate_thesis(dict(legacy))
+        assert m["direction"] == "bullish" and m["multiplier"] == 1
+        assert m["instrument"] is None and m["option"] is None and m["catalyst_date"] is None
+
+    def test_legacy_entered_thesis_is_shares(self):
+        import trader_v2.store as store
+        m = store._migrate_thesis({"id": "T-X", "symbol": "NVDA", "status": "entered"})
+        assert m["instrument"] == "shares"
+
+    def test_migration_idempotent_preserves_v2_fields(self):
+        import trader_v2.store as store
+        t = {"id": "T-X", "symbol": "NVDA", "status": "entered",
+             "direction": "bearish", "instrument": "option", "multiplier": 100,
+             "option": {"contract": "NVDA260918P00170000", "type": "put"},
+             "catalyst_date": "2026-08-14"}
+        m = store._migrate_thesis(dict(t))
+        assert m == t
+
+
+class TestExitReasonsExtended:
+    def test_option_reasons_accepted_by_apply_exit(self):
+        for reason in ("premium_stop", "take_profit", "expiry_force_exit"):
+            t = make_entered(entry=2.40, qty=1.0)
+            th.apply_exit(t, 1.20, reason)
+            assert t["exit_reason"] == reason
