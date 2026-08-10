@@ -151,6 +151,39 @@ Resulting book / per-position / trades-day: **$1k → 8 / $125 / 16**, **$10k �
 
 ---
 
+## trader_v2 Options (`trader_v2/config.py` + `trader_v2/options.py`)
+
+Options are leverage on strong theses, never a parallel strategy: shares stay
+the default expression; a long call/put fires only when conviction ≥ 4, the
+catalyst is dated inside the TTL, the account's options level allows it, and a
+contract passes every filter. All selection/sizing/exits are deterministic —
+the research LLM proposes underlying theses only.
+
+| Parameter | Env Var | Default | Meaning |
+|---|---|---|---|
+| Master switch | `V2_OPT_ENABLED` | true | false = shares-only mode |
+| Conviction bar | `V2_OPT_MIN_CONVICTION` | 4 | min conviction (of 5) to express a thesis as an option; also gates bearish theses (puts are their only expression) |
+| DTE window | `V2_OPT_DTE_MIN` / `V2_OPT_DTE_MAX` | 30 / 45 | contract expiry window at entry |
+| Delta window | `V2_OPT_DELTA_MIN` / `V2_OPT_DELTA_MAX` | 0.40 / 0.60 | ranked by nearest 0.50; puts filtered on magnitude |
+| Min open interest | `V2_OPT_MIN_OI` | 100 | from the contracts endpoint (snapshots don't carry OI) |
+| Max spread | `V2_OPT_MAX_SPREAD_PCT` | 0.10 | of mid — replaces options_bot's absolute $0.50 |
+| Per-position premium cap | `V2_OPT_MAX_PREMIUM_PCT` | 0.25 | of capital |
+| Min premium | `V2_OPT_MIN_PREMIUM` | $50 | a "viable" contract cheaper than this at 0.4–0.6Δ/30–45 DTE is a data anomaly |
+| Sleeve cap | `V2_OPT_SLEEVE_CAP_PCT` | 0.35 | total open premium / capital |
+| Premium stops | `V2_OPT_STOP_TIERS` | `5:-0.25,14:-0.40,-0.55` | DTE-tiered, every cycle (theta burns faster near expiry) |
+| Take profit | `V2_OPT_TAKE_PROFIT_PCT` | 0.60 | on premium, any cycle; no premium trailing (whipsaws on wide spreads) |
+| Expiry force-exit | `V2_OPT_FORCE_EXIT_DTE` | 3 | DTE ≤ 3 in close window; DTE ≤ 1 any cycle; clock-derived (never local wall time) |
+| Fill wait | `V2_OPT_FILL_WAIT_SEC` | 45 | limit-at-mid poll before cancel; entries retry next cycle |
+| Require greeks | `V2_OPT_REQUIRE_GREEKS` | true | missing greeks → shares fallback, never blind selection |
+| Data feed | `V2_OPT_FEED` | unset | unset = SDK default (indicative); `opra` if subscribed |
+| Capital anchor | `V2_CAPITAL_MODE` | static | `static` = `V2_CAPITAL`; `dynamic` = live account equity each cycle |
+
+Option exit precedence: `expiry_force_exit` > `premium_stop` > `research_close` >
+`invalidation` (on the **underlying**, close window only, inverted for puts) >
+`take_profit` > `ttl_expiry`.
+
+---
+
 ## Milestone Review (`PARAMETER_REVIEW_CHECKLIST.md`)
 
 | Milestone | Parameter | Current | Planned |
@@ -167,6 +200,7 @@ Resulting book / per-position / trades-day: **$1k → 8 / $125 / 16**, **$10k �
 
 | Date | Change |
 |---|---|
+| Aug 10 | **v2 options data layer (PR1 of the stocks+options overhaul).** New `trader_v2/options.py` (pure): OSI parsing, DTE-tiered premium stops (lifted from options_bot's one proven idea), spread-as-%-of-mid, tick rounding, delta-targeted `select_contract` (0.40–0.60Δ ranked by nearest 0.50 — the thesis drives the strike, never the budget; the old bot's ~$66 budget forced far-OTM lottery tickets), integer-contract sizing, and `option_exit_decision` with the precedence above. New `trader_v2/options_data.py`: contracts (OI) ⋈ snapshots (quotes+greeks) join by OSI symbol — verified alpaca-py 0.40.0 snapshots carry no OI. `AlpacaClient` gains lazy `OptionHistoricalDataClient`, paginated `get_option_contracts` (the SDK's default 100/page silently truncated options_bot's chains), chunked `get_option_snapshots`, `submit_option_limit_order`, `get_options_level`. All `V2_OPT_*` knobs above + `validate()` invariants. Nothing calls any of it yet — executor integration is PR3. 47 tests added (190 pass). |
 | Aug 1 | **Same-day stop-out cooldown + disaster stop gets an opening window.** Thu 7/30 lost ~$20.73, almost entirely to two stacked issues: (1) MANH/MO/ZWS all gapped down overnight and tripped the `-6%` disaster stop within ~12 min of open (thin opening-auction prints, not a settled decline) — new `RISK_OPEN_WINDOW_MIN` (15 min) suppresses the disaster stop right after open, mirroring the close-window deferral already used for the regular stop; a real collapse still trips it the very next cycle. (2) After the disaster stop, the LLM rebought MO 3 more times that same afternoon on the same signal — the "no rebuy" guard only covered the symbol's own force-exit cycle. New `RiskManager.mark_stopped_out`/`is_cooling_down` blocks any symbol that hits **any** stop (disaster, close, or trailing) from being bought again for the rest of the trading day, persisted in `risk_state.json` and reset with the other daily counters. 13 tests added (143 pass). Needs droplet **rebuild**; verify in-container: `RISK_OPEN_WINDOW_MIN`. |
 | Jul 24 | **v2: TTL restarts on fill + analyst model → Sonnet 5.** (1) A thesis's `expires` now resets to `fill_date + ttl_days` when the executor enters — the pre-entry TTL still decays unfilled zones, but a filled position gets its full runway (live artifact: CSW written Fri/5d TTL, filled Mon, force-expired Tue at −0.8% with 1 day of runway). (2) `V2_RESEARCH_MODEL` default `claude-sonnet-4-6` → **`claude-sonnet-5`** (better analyst, intro $2/$10 per MTok through 8/31); all v2 call sites pass `temperature=None` (Sonnet 5 rejects non-default sampling params). v1 untouched (control group mid-evaluation). 1 test added (130 pass). Needs droplet **rebuild of trader-v2 only**. |
 | Jul 17 | **trader_v2 MVP — thesis-driven PAPER bot (new `trader_v2/` package + `trader-v2` compose service).** Inverts v1's design: the LLM is a nightly analyst (Sonnet) producing structured theses `{entry_zone, invalidation, catalyst, conviction, TTL}`; a deterministic executor trades the plan on a 15-min cycle — the LLM never touches order flow. v1's exit lessons baked in: invalidation evaluated only in the close window, −8% intraday disaster stop, +3%/−3% trailing for winners. Nightly post-mortem writes durable lessons to `lessons.md` (fed into every research prompt); Friday Opus deep review curates it. Event journal (`journal.jsonl`) records every decision for attribution. Rails: paper-endpoint startup guard, max 4 positions (equal-weight of `V2_CAPITAL=1350`), −5% daily circuit breaker, `V2_TRADING_ENABLED` kill switch, broker reconciliation every cycle. Runs against the Alpaca **paper** account (needs `ALPACA_PAPER_API_KEY/SECRET` in .env) with isolated state under `data/v2/`; v1 live is untouched. Benchmarked daily vs SPY-from-first-run + v1 equity. All `V2_*` params env-tunable. 43 tests added (129 pass). Also: `llm_engine` accepts `temperature=None` (omit param — Opus 4.8 rejects sampling params). |

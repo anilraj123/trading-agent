@@ -16,6 +16,14 @@ class AlpacaClient:
         is_paper = "paper-api" in Config.ALPACA_BASE_URL
         self.trading = TradingClient(Config.ALPACA_API_KEY, Config.ALPACA_SECRET_KEY, paper=is_paper)
         self.data = StockHistoricalDataClient(Config.ALPACA_API_KEY, Config.ALPACA_SECRET_KEY)
+        self._option_data = None  # lazy: only trader_v2's options path needs it
+
+    @property
+    def option_data(self):
+        if self._option_data is None:
+            from alpaca.data.historical.option import OptionHistoricalDataClient
+            self._option_data = OptionHistoricalDataClient(Config.ALPACA_API_KEY, Config.ALPACA_SECRET_KEY)
+        return self._option_data
 
     def get_account(self):
         return self.trading.get_account()
@@ -166,6 +174,84 @@ class AlpacaClient:
                 holidays.append(d)
             d += timedelta(days=1)
         return holidays
+
+    # --- options (used by trader_v2 only; v1 never calls these) --------------
+
+    def get_options_level(self) -> int:
+        """Account's options trading level: 0=disabled, 1=covered, 2=long
+        calls/puts, 3=spreads. 0 on any failure — callers degrade to shares."""
+        try:
+            return int(self.get_account().options_trading_level or 0)
+        except Exception as e:
+            logger.warning(f"get_options_level failed ({e}); treating as 0")
+            return 0
+
+    def get_option_contracts(self, underlying: str, exp_gte: date, exp_lte: date,
+                             strike_gte: float = None, strike_lte: float = None) -> list:
+        """All tradable option contracts for one underlying in the expiry/strike
+        window, following pagination (the SDK default page of 100 silently
+        truncated the old options_bot's chains). Returns [] on failure."""
+        from alpaca.trading.requests import GetOptionContractsRequest
+        from alpaca.trading.enums import AssetStatus as _AS
+        out, token = [], None
+        try:
+            while True:
+                req = GetOptionContractsRequest(
+                    underlying_symbols=[underlying], status=_AS.ACTIVE,
+                    expiration_date_gte=exp_gte, expiration_date_lte=exp_lte,
+                    strike_price_gte=str(strike_gte) if strike_gte is not None else None,
+                    strike_price_lte=str(strike_lte) if strike_lte is not None else None,
+                    limit=500, page_token=token,
+                )
+                resp = self.trading.get_option_contracts(req)
+                out.extend(resp.option_contracts or [])
+                token = resp.next_page_token
+                if not token:
+                    break
+        except Exception as e:
+            logger.warning(f"get_option_contracts({underlying}) failed: {e}")
+            return []
+        return out
+
+    def get_option_snapshots(self, symbols: list, feed: str = None) -> dict:
+        """Snapshots (latest quote, IV, greeks) for OSI symbols, chunked at the
+        API's 100-symbol limit. Tolerant: a failed chunk is skipped, not fatal."""
+        from alpaca.data.requests import OptionSnapshotRequest
+        snaps = {}
+        for i in range(0, len(symbols), 100):
+            batch = symbols[i:i + 100]
+            try:
+                kwargs = {"symbol_or_symbols": batch}
+                if feed:
+                    kwargs["feed"] = feed
+                resp = self.option_data.get_option_snapshot(OptionSnapshotRequest(**kwargs))
+                if isinstance(resp, dict):
+                    snaps.update(resp)
+            except Exception as e:
+                logger.warning(f"Option snapshot batch at {i} failed: {e}")
+        return snaps
+
+    def submit_option_limit_order(self, symbol: str, side: OrderSide, qty: int, limit_price: float):
+        """Limit order for an option contract (integer qty, DAY). Options are
+        never traded at market in v2 — spreads are too wide."""
+        req = LimitOrderRequest(
+            symbol=symbol, qty=int(qty), limit_price=limit_price,
+            side=side, time_in_force=TimeInForce.DAY,
+        )
+        order = self.trading.submit_order(req)
+        logger.info(f"Option limit order: {side} {qty} {symbol} @ ${limit_price} (id={order.id})")
+        return order
+
+    def get_order(self, order_id):
+        return self.trading.get_order_by_id(order_id)
+
+    def cancel_order(self, order_id) -> bool:
+        try:
+            self.trading.cancel_order_by_id(order_id)
+            return True
+        except Exception as e:
+            logger.warning(f"cancel_order {order_id} failed: {e}")
+            return False
 
     def get_daily_pl(self):
         acct = self.get_account()
