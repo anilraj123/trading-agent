@@ -56,6 +56,9 @@ class V2Config:
     OPT_REQUIRE_GREEKS = os.getenv("V2_OPT_REQUIRE_GREEKS", "true").lower() == "true"
     OPT_FEED = os.getenv("V2_OPT_FEED") or None                              # None -> SDK default
 
+    # --- PDT guard (dormant on cash accounts — see trader_v2/guards.py) -----
+    PDT_SOFT_MAX = int(os.getenv("V2_PDT_SOFT_MAX", "2"))
+
     # --- capital anchor mode ------------------------------------------------
     # static: sizing anchored to CAPITAL (paper apples-to-apples vs v1).
     # dynamic: sizing anchored to live account equity each cycle.

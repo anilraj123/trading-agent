@@ -51,6 +51,33 @@ class V2Bot:
             equity = self.alpaca.get_portfolio_value()
             baseline = store.init_baseline(datetime.now(ET).date().isoformat(), equity)
             logger.info(f"Baseline initialized: {baseline}")
+        self._startup_account_check()
+
+    def _startup_account_check(self):
+        """One-shot account facts at boot: options level, margin vs cash,
+        equity, endpoint. Loud when live; explicit about degraded modes."""
+        try:
+            acct = self.alpaca.get_account()
+            level = int(getattr(acct, "options_trading_level", 0) or 0)
+            mult = float(getattr(acct, "multiplier", 1) or 1)
+            equity = float(acct.equity)
+        except Exception as e:
+            logger.error(f"startup account check failed: {e}")
+            self.notif.send(f"startup account check FAILED: {e}", priority="high")
+            return
+        live = "paper-api" not in Config.ALPACA_BASE_URL
+        acct_kind = "MARGIN (PDT guard armed)" if mult > 1 else "cash (PDT n/a, settled funds bind)"
+        mode = ("stocks+options" if V2Config.OPT_ENABLED and level >= 2
+                else "SHARES-ONLY (options " + ("disabled" if not V2Config.OPT_ENABLED
+                                                else f"level {level} < 2") + ")")
+        banner = (f"{'*** LIVE TRADING ***' if live else 'paper'} | equity ${equity:.2f} | "
+                  f"{acct_kind} | options level {level} | mode: {mode} | "
+                  f"trading {'ENABLED' if V2Config.TRADING_ENABLED else 'DISABLED (kill switch)'}")
+        logger.info(f"startup: {banner}")
+        self.notif.send(f"startup: {banner}", priority="high" if live else "normal")
+        run_state = store.load_run_state()
+        run_state["options_level"] = level
+        store.save_run_state(run_state)
 
     # ------------------------------------------------------------------ cycle
 
