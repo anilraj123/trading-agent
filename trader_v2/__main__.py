@@ -149,8 +149,13 @@ class V2Bot:
         pos_lines = []
         for t in theses:
             if t["status"] == "entered":
-                tag = " trailing" if t["trailing"] else ""
-                pos_lines.append(f"{t['symbol']} ({t['id']}{tag})")
+                if t.get("instrument") == "option" and t.get("option"):
+                    o = t["option"]
+                    strike_s = f"{'C' if o['type'] == 'call' else 'P'}{o['strike']:g}"
+                    pos_lines.append(f"{t['symbol']} {int(t['qty'])}x {strike_s} exp {o['expiry']}")
+                else:
+                    tag = " trailing" if t["trailing"] else ""
+                    pos_lines.append(f"{t['symbol']} ({t['id']}{tag})")
         waiting = [t["symbol"] for t in theses if t["status"] == "active"]
 
         msg = (f"DAILY — {session_date.strftime('%b %d')}\n"

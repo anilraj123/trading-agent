@@ -284,14 +284,24 @@ def run_nightly(alpaca, llm, discovery, notif):
     entered_view = []
     for t in entered:
         price = closes.get(t["symbol"])
-        entered_view.append({
+        view = {
             "thesis_id": t["id"], "symbol": t["symbol"], "conviction": t["conviction"],
+            "direction": t.get("direction", "bullish"),
+            "instrument": t.get("instrument", "shares"),
             "entry_price": t["entry_price"], "current_close": price,
             "pnl_pct": round((price / t["entry_price"] - 1) * 100, 2) if price and t["entry_price"] else None,
             "invalidation_price": t["invalidation_price"], "expires": t["expires"],
             "trailing": t["trailing"], "hwm": t["hwm"],
             "catalyst": t["catalyst"], "reasoning": t["reasoning"],
-        })
+        }
+        if t.get("instrument") == "option" and t.get("option"):
+            # entry_price/pnl here are PREMIUM values; current_close is the
+            # underlying's close — the analyst judges the thesis on the
+            # underlying, the executor manages the premium mechanically.
+            view["option"] = {k: t["option"].get(k) for k in
+                              ("contract", "type", "strike", "expiry", "entry_delta")}
+            view["pnl_pct"] = None  # premium P&L isn't derivable from the underlying close
+        entered_view.append(view)
     unfilled_view = [{
         "symbol": t["symbol"], "conviction": t["conviction"], "entry_zone": t["entry_zone"],
         "expires": t["expires"], "catalyst": t["catalyst"],

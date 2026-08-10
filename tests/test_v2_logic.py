@@ -450,3 +450,102 @@ class TestExitReasonsExtended:
             t = make_entered(entry=2.40, qty=1.0)
             th.apply_exit(t, 1.20, reason)
             assert t["exit_reason"] == reason
+
+# ---------------------------------------------------------------------------
+# Executor options integration: fills, P&L x100, reconcile (overhaul PR3)
+# ---------------------------------------------------------------------------
+
+OPTION_META = {"contract": "NVDA260918C00185000", "type": "call",
+               "strike": 185.0, "expiry": "2026-09-18", "entry_delta": 0.52}
+
+
+def make_entered_option(entry=2.40, qty=1.0, **over):
+    t = th.build_thesis(raw_thesis(), TODAY)
+    th.apply_fill(t, entry, qty, "ord1", instrument="option", option_meta=OPTION_META)
+    t.update(over)
+    return t
+
+
+class TestOptionFill:
+    def test_fill_sets_option_fields(self):
+        t = make_entered_option()
+        assert t["instrument"] == "option" and t["multiplier"] == 100
+        assert t["option"]["contract"] == "NVDA260918C00185000"
+        assert t["entry_price"] == 2.40 and t["qty"] == 1.0
+
+    def test_option_fill_requires_meta(self):
+        t = th.build_thesis(raw_thesis(), TODAY)
+        try:
+            th.apply_fill(t, 2.40, 1.0, "ord1", instrument="option")
+            assert False, "should have raised"
+        except ValueError as e:
+            assert "option_meta" in str(e)
+
+    def test_shares_fill_unchanged(self):
+        t = th.build_thesis(raw_thesis(), TODAY)
+        th.apply_fill(t, 100.0, 3.0, "ord1")
+        assert t["instrument"] == "shares" and t["multiplier"] == 1 and t["option"] is None
+
+
+class TestOptionPnl:
+    def test_pnl_uses_100_multiplier(self):
+        t = make_entered_option(entry=2.40, qty=2.0)
+        th.apply_exit(t, 3.00, "take_profit")
+        assert t["pnl_dollars"] == round((3.00 - 2.40) * 2 * 100, 4)  # $120
+        assert t["pnl_pct"] == 25.0
+
+    def test_shares_pnl_multiplier_1(self):
+        t = make_entered(entry=100.0, qty=3.0)
+        th.apply_exit(t, 110.0, "trailing_stop")
+        assert t["pnl_dollars"] == 30.0
+
+    def test_loss_pnl(self):
+        t = make_entered_option(entry=2.40, qty=1.0)
+        th.apply_exit(t, 1.20, "premium_stop")
+        assert t["pnl_dollars"] == -120.0 and t["pnl_pct"] == -50.0
+
+
+class TestBrokerSymbol:
+    def test_option_uses_contract(self):
+        assert th.broker_symbol(make_entered_option()) == "NVDA260918C00185000"
+
+    def test_shares_uses_symbol(self):
+        assert th.broker_symbol(make_entered()) == "NVDA"
+
+
+class TestReconcileClassify:
+    def test_mixed_book_all_matched(self):
+        eq = make_entered(entry=100.0, qty=3.0)
+        op = make_entered_option(qty=1.0)
+        broker = {"NVDA": 3.0, "NVDA260918C00185000": 1.0}
+        missing, drifted, untracked = th.reconcile_classify([eq, op], broker)
+        assert missing == [] and drifted == [] and untracked == []
+
+    def test_option_position_not_untracked(self):
+        op = make_entered_option(qty=1.0)
+        _, _, untracked = th.reconcile_classify([op], {"NVDA260918C00185000": 1.0})
+        assert untracked == []
+
+    def test_missing_option(self):
+        op = make_entered_option()
+        missing, _, _ = th.reconcile_classify([op], {})
+        assert missing == [op]
+
+    def test_qty_drift_option(self):
+        op = make_entered_option(qty=2.0)
+        _, drifted, _ = th.reconcile_classify([op], {"NVDA260918C00185000": 1.0})
+        assert drifted == [(op, 1.0)]
+
+    def test_truly_untracked_flagged(self):
+        eq = make_entered(entry=100.0, qty=3.0)
+        _, _, untracked = th.reconcile_classify(
+            [eq], {"NVDA": 3.0, "TSLA": 5.0, "SPY260918P00500000": 1.0})
+        assert set(untracked) == {"TSLA", "SPY260918P00500000"}
+
+    def test_equity_same_underlying_as_option_is_distinct(self):
+        # Holding NVDA shares while the thesis holds an NVDA call: the shares
+        # are untracked (v2 didn't buy them), the call is matched.
+        op = make_entered_option(qty=1.0)
+        missing, drifted, untracked = th.reconcile_classify(
+            [op], {"NVDA260918C00185000": 1.0, "NVDA": 10.0})
+        assert missing == [] and drifted == [] and untracked == ["NVDA"]
