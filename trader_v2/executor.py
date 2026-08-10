@@ -18,6 +18,7 @@ from datetime import date as date_type, datetime, timezone
 from alpaca.trading.enums import OrderSide
 
 from trader.risk_manager import in_close_window
+from . import guards
 from . import options as opt
 from . import options_data
 from . import store
@@ -126,6 +127,22 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
     entered = [t for t in theses if t["status"] == "entered"]
     actives = [t for t in theses if t["status"] == "active"]
 
+    # PDT guard is armed only on margin accounts (see guards.py); Alpaca
+    # reports daytrade_count=null on cash accounts.
+    pdt_armed = float(getattr(account, "multiplier", 1) or 1) > 1
+    daytrade_count = getattr(account, "daytrade_count", None) if pdt_armed else None
+    daytrade_count = int(daytrade_count) if daytrade_count is not None else None
+
+    # Options-level downgrade detection: entries gate on the live level every
+    # cycle anyway (choose_instrument); this exists to NOTIFY the change once.
+    level_now = int(getattr(account, "options_trading_level", 0) or 0)
+    if run_state.get("options_level") is not None and run_state["options_level"] != level_now:
+        notif.send(f"v2: options trading level changed {run_state['options_level']} -> {level_now}"
+                   + (" — options entries stop" if level_now < 2 else ""), priority="high")
+        store.journal(th.event("options_level_changed",
+                               old=run_state["options_level"], new=level_now))
+    run_state["options_level"] = level_now
+
     # --- 1. reconcile (always) ---------------------------------------------
     # Matched by BROKER symbol: the OSI contract for option theses, the plain
     # equity symbol otherwise — so option positions are tracked, not spam.
@@ -184,6 +201,14 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
         if kill_switch:
             _skip(t, "halted", price)
             continue
+        if pdt_armed and guards.pdt_exit_blocked(
+                (t.get("entered_at") or "")[:10], today.isoformat(),
+                daytrade_count, reason, V2Config.PDT_SOFT_MAX):
+            _skip(t, f"pdt_deferred:{reason}", price)
+            if reason in guards.CRITICAL_EXITS:
+                notif.send(f"v2 PDT: {reason} on {t['symbol']} DEFERRED to next session "
+                           f"(daytrade_count={daytrade_count}) — check manually", priority="high")
+            continue
         try:
             if t["instrument"] == "option":
                 fill = _close_option(alpaca, t, premium, urgent=reason in URGENT_OPTION_EXITS)
@@ -215,7 +240,7 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
     # --- 5. entries ---------------------------------------------------------
     # capital anchor: static V2_CAPITAL (paper apples-to-apples) or live equity
     capital = equity if V2Config.CAPITAL_MODE == "dynamic" else V2Config.CAPITAL
-    options_level = int(getattr(account, "options_trading_level", 0) or 0)
+    options_level = level_now
     if not halted and not kill_switch:
         entered_count = len([t for t in theses if t["status"] == "entered"])
         held_syms = {t["symbol"] for t in theses if t["status"] == "entered"} | \
@@ -241,6 +266,11 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
 
             # instrument policy gate, then contract viability
             sleeve = th.sleeve_room(theses, capital, V2Config.OPT_SLEEVE_CAP_PCT)
+            if pdt_armed and guards.pdt_entry_blocked(daytrade_count):
+                # An entry we might be unable to stop out same-day is an
+                # entry we don't make (margin accounts only).
+                _skip(t, "pdt_entry_blocked", price)
+                continue
             instrument, gate_reason = th.choose_instrument(
                 t, today, options_level, sleeve,
                 opt_enabled=V2Config.OPT_ENABLED,

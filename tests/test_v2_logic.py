@@ -549,3 +549,40 @@ class TestReconcileClassify:
         missing, drifted, untracked = th.reconcile_classify(
             [op], {"NVDA260918C00185000": 1.0, "NVDA": 10.0})
         assert missing == [] and drifted == [] and untracked == ["NVDA"]
+
+# ---------------------------------------------------------------------------
+# PDT guard — dormant on cash accounts, armed on margin (overhaul PR4)
+# ---------------------------------------------------------------------------
+
+from trader_v2 import guards
+
+
+class TestPdtExitBlocked:
+    TODAY_ISO = "2026-08-10"
+
+    def test_multiday_hold_never_blocked(self):
+        for reason in th.EXIT_REASONS:
+            assert not guards.pdt_exit_blocked("2026-08-07", self.TODAY_ISO, 3, reason)
+
+    def test_cash_account_null_count_never_blocked(self):
+        assert not guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, None, "trailing_stop")
+
+    def test_noncritical_deferred_at_soft_max(self):
+        for reason in ("trailing_stop", "take_profit", "research_close",
+                       "ttl_expiry", "invalidation"):
+            assert not guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, 1, reason)
+            assert guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, 2, reason)
+
+    def test_critical_allowed_through_third_blocked_at_fourth(self):
+        for reason in guards.CRITICAL_EXITS:
+            assert not guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, 2, reason)
+            assert guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, 3, reason)
+
+    def test_soft_max_configurable(self):
+        assert not guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, 2,
+                                           "take_profit", soft_max=3)
+
+    def test_entry_blocked_at_three(self):
+        assert not guards.pdt_entry_blocked(2)
+        assert guards.pdt_entry_blocked(3)
+        assert not guards.pdt_entry_blocked(None)
