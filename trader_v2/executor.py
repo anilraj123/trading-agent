@@ -144,6 +144,11 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
             if t["symbol"] in held_syms:
                 _skip(t, "already_held", None)
                 continue
+            if t.get("direction") == "bearish":
+                # Puts are the only bearish expression and the options entry
+                # path lands in PR3 — until then bearish theses wait unfilled.
+                _skip(t, "options_not_enabled", None)
+                continue
             price = _price_of(alpaca, t["symbol"])
             if price is None:
                 _skip(t, "no_price", None)

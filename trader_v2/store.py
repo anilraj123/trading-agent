@@ -34,10 +34,21 @@ def _atomic_write_json(path: str, obj: dict):
 
 # --- theses ----------------------------------------------------------------
 
+def _migrate_thesis(t: dict) -> dict:
+    """Stamp schema-v2 fields onto a legacy (v1-schema) thesis. Idempotent.
+    Legacy theses are all long equity, so an entered one is 'shares'."""
+    t.setdefault("direction", "bullish")
+    t.setdefault("catalyst_date", None)
+    t.setdefault("instrument", "shares" if t.get("status") == "entered" else None)
+    t.setdefault("option", None)
+    t.setdefault("multiplier", 1)
+    return t
+
+
 def load_theses() -> list:
     try:
         with open(THESES_FILE) as f:
-            return json.load(f).get("theses", [])
+            return [_migrate_thesis(t) for t in json.load(f).get("theses", [])]
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 
@@ -45,7 +56,7 @@ def load_theses() -> list:
 def save_theses(theses: list):
     live = [t for t in theses if t["status"] in ("active", "entered")]
     _atomic_write_json(THESES_FILE, {
-        "version": 1,
+        "version": 2,
         "updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "theses": live,
     })
