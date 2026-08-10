@@ -275,13 +275,21 @@ def daily_loss_halted(equity: float, last_equity: float, halt_pct: float) -> boo
 # Transitions
 # --------------------------------------------------------------------------
 
-def apply_fill(t: dict, fill_price: float, qty: float, order_id, today: date = None) -> dict:
+def apply_fill(t: dict, fill_price: float, qty: float, order_id, today: date = None,
+               instrument: str = "shares", option_meta: dict = None) -> dict:
+    """For options: fill_price is the PREMIUM per contract, qty is integer
+    contracts, option_meta = {contract, type, strike, expiry, entry_delta}."""
     if t["status"] != "active":
         raise ValueError(f"cannot enter thesis {t['id']} in status {t['status']}")
+    if instrument == "option" and not option_meta:
+        raise ValueError(f"option fill for {t['id']} needs option_meta")
     today = today or datetime.now(timezone.utc).date()
     t.update(status="entered", entered_at=_now_iso(), entry_price=float(fill_price),
              qty=float(qty), order_id=str(order_id) if order_id else None,
              hwm=float(fill_price), trailing=False,
+             instrument=instrument,
+             option=dict(option_meta) if option_meta else None,
+             multiplier=100 if instrument == "option" else 1,
              # TTL clock restarts at FILL: the pre-entry TTL decays unfilled
              # zones; once entered, the position gets its full ttl_days to play
              # out (CSW 7/21: written Fri, filled Mon, expired Tue = 1 day of
@@ -299,8 +307,38 @@ def apply_exit(t: dict, fill_price: float, reason: str) -> dict:
     t.update(status="closed", closed_at=_now_iso(), exit_price=float(fill_price),
              exit_reason=reason,
              pnl_pct=round((fill_price / entry - 1) * 100, 4) if entry else None,
-             pnl_dollars=round((fill_price - entry) * (t["qty"] or 0), 4))
+             pnl_dollars=round((fill_price - entry) * (t["qty"] or 0) * t.get("multiplier", 1), 4))
     return t
+
+
+def broker_symbol(t: dict) -> str:
+    """The symbol the BROKER knows this position by: the OSI contract for an
+    option thesis, the plain equity symbol otherwise."""
+    if t.get("instrument") == "option" and t.get("option"):
+        return t["option"]["contract"]
+    return t["symbol"]
+
+
+def reconcile_classify(entered: list, broker_qty: dict) -> tuple:
+    """Pure reconcile: match entered theses against broker positions by their
+    broker symbol (OSI contract for options).
+
+    Returns (missing, drifted, untracked):
+      missing   — theses with no broker position (close as reconcile_missing)
+      drifted   — (thesis, broker_qty) pairs where qty diverged (adopt broker)
+      untracked — broker symbols (equity or OSI) no thesis accounts for
+    """
+    missing, drifted = [], []
+    tracked = set()
+    for t in entered:
+        bsym = broker_symbol(t)
+        tracked.add(bsym)
+        if bsym not in broker_qty:
+            missing.append(t)
+        elif abs(broker_qty[bsym] - (t["qty"] or 0)) > 1e-6:
+            drifted.append((t, broker_qty[bsym]))
+    untracked = [s for s in broker_qty if s not in tracked]
+    return missing, drifted, untracked
 
 
 def apply_terminal(t: dict, status: str) -> dict:
