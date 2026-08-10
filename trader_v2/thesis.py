@@ -14,8 +14,12 @@ their full snapshot lives in the terminal journal event.
 """
 from datetime import date, datetime, timedelta, timezone
 
+from trader_v2.options import OPTION_EXIT_REASONS
+
 EXIT_REASONS = ("disaster_stop", "research_close", "invalidation",
-                "trailing_stop", "ttl_expiry", "reconcile_missing")
+                "trailing_stop", "ttl_expiry", "reconcile_missing") + OPTION_EXIT_REASONS
+
+DIRECTIONS = ("bullish", "bearish")
 
 MAX_ZONE_WIDTH_PCT = 0.15     # entry zone no wider than 15% of its low
 MAX_ZONE_DRIFT_PCT = 0.15     # zone must lie within ±15% of last close
@@ -37,16 +41,22 @@ def build_thesis(raw: dict, today: date) -> dict:
     return {
         "id": f"T{today.strftime('%Y%m%d')}-{raw['symbol'].upper()}",
         "symbol": raw["symbol"].upper(),
+        "direction": raw.get("direction", "bullish"),
         "conviction": int(raw["conviction"]),
         "entry_zone": [float(raw["entry_zone_low"]), float(raw["entry_zone_high"])],
         "invalidation_price": float(raw["invalidation_price"]),
         "price_target": float(raw["price_target"]),   # advisory only — exits are trail/invalidation
         "catalyst": str(raw["catalyst"]),
+        "catalyst_date": raw.get("catalyst_date") or None,   # ISO date or None
         "ttl_days": int(raw["ttl_days"]),
         "reasoning": str(raw["reasoning"]),
         "status": "active",
         "created": _now_iso(),
         "expires": (today + timedelta(days=int(raw["ttl_days"]))).isoformat(),
+        # instrument is chosen at ENTRY by deterministic code, never by the LLM:
+        # "shares" or "option"; option carries {contract, type, strike, expiry,
+        # entry_delta, entry_premium}. multiplier is 100 for options.
+        "instrument": None, "option": None, "multiplier": 1,
         "entered_at": None, "entry_price": None, "qty": None, "order_id": None,
         "hwm": None, "trailing": False, "pending_close": False,
         "revisions": [], "last_skip": None,
@@ -57,11 +67,18 @@ def build_thesis(raw: dict, today: date) -> dict:
 
 def validate_new_thesis(raw: dict, last_close: float, candidate_symbols: set,
                         entered_symbols: set, blacklist: set = frozenset(),
-                        crypto_suffixes: tuple = ()) -> tuple:
+                        crypto_suffixes: tuple = (), today: date = None,
+                        opt_min_conviction: int = 4) -> tuple:
     """Returns (error_string | None). Purely checks one raw thesis dict from
-    the LLM against the guardrails; caller builds the thesis on success."""
+    the LLM against the guardrails; caller builds the thesis on success.
+
+    Direction-aware: bullish geometry is invalidation < zone < target (long
+    shares or calls); bearish inverts to target < zone < invalidation (long
+    puts — the ONLY bearish expression, so bearish additionally requires a
+    dated catalyst and conviction >= opt_min_conviction)."""
     try:
         sym = str(raw["symbol"]).upper()
+        direction = str(raw.get("direction", "bullish"))
         conviction = int(raw["conviction"])
         lo = float(raw["entry_zone_low"])
         hi = float(raw["entry_zone_high"])
@@ -71,6 +88,8 @@ def validate_new_thesis(raw: dict, last_close: float, candidate_symbols: set,
     except (KeyError, TypeError, ValueError) as e:
         return f"malformed thesis: {e}"
 
+    if direction not in DIRECTIONS:
+        return f"{sym}: bad direction {direction!r}"
     if sym not in candidate_symbols:
         return f"{sym}: not in tonight's candidate set (hallucinated?)"
     if sym in blacklist:
@@ -88,14 +107,36 @@ def validate_new_thesis(raw: dict, last_close: float, candidate_symbols: set,
     if last_close and last_close > 0:
         if hi < last_close * (1 - MAX_ZONE_DRIFT_PCT) or lo > last_close * (1 + MAX_ZONE_DRIFT_PCT):
             return f"{sym}: zone [{lo}, {hi}] beyond ±{MAX_ZONE_DRIFT_PCT:.0%} of close {last_close}"
-    if inval >= lo:
-        return f"{sym}: invalidation {inval} must be below zone low {lo}"
-    if inval < lo * (1 - MAX_INVALIDATION_DEPTH):
-        return f"{sym}: invalidation {inval} deeper than {MAX_INVALIDATION_DEPTH:.0%} below zone"
-    if target <= hi:
-        return f"{sym}: target {target} must exceed zone high {hi}"
     if not (TTL_RANGE[0] <= ttl <= TTL_RANGE[1]):
         return f"{sym}: ttl {ttl} outside {TTL_RANGE}"
+
+    if direction == "bullish":
+        if inval >= lo:
+            return f"{sym}: invalidation {inval} must be below zone low {lo}"
+        if inval < lo * (1 - MAX_INVALIDATION_DEPTH):
+            return f"{sym}: invalidation {inval} deeper than {MAX_INVALIDATION_DEPTH:.0%} below zone"
+        if target <= hi:
+            return f"{sym}: target {target} must exceed zone high {hi}"
+    else:  # bearish: price falling is the thesis
+        if inval <= hi:
+            return f"{sym}: bearish invalidation {inval} must be above zone high {hi}"
+        if inval > hi * (1 + MAX_INVALIDATION_DEPTH):
+            return f"{sym}: bearish invalidation {inval} further than {MAX_INVALIDATION_DEPTH:.0%} above zone"
+        if target >= lo:
+            return f"{sym}: bearish target {target} must be below zone low {lo}"
+        if conviction < opt_min_conviction:
+            return f"{sym}: bearish needs conviction >= {opt_min_conviction} (puts are its only expression)"
+        if not raw.get("catalyst_date"):
+            return f"{sym}: bearish needs a dated catalyst (puts are its only expression)"
+
+    cat_date = raw.get("catalyst_date")
+    if cat_date:
+        try:
+            cd = date.fromisoformat(str(cat_date))
+        except ValueError:
+            return f"{sym}: unparseable catalyst_date {cat_date!r}"
+        if today is not None and not (today <= cd <= today + timedelta(days=ttl)):
+            return f"{sym}: catalyst_date {cat_date} outside [today, today+{ttl}d]"
     return None
 
 
@@ -139,6 +180,52 @@ def position_size(capital: float, max_positions: int, cap_pct: float,
     if notional < min_notional:
         return 0.0
     return round(notional / price, 6)
+
+
+def choose_instrument(t: dict, today: date, options_level: int, sleeve_room: float,
+                      *, opt_enabled: bool, min_conviction: int, min_premium: float) -> tuple:
+    """('shares' | 'option' | 'skip', reason | None) for an active thesis at
+    entry time. Deterministic policy: shares are the default expression; an
+    option is leverage reserved for high-conviction, catalyst-dated theses the
+    account can actually trade. Contract viability (a real chain passing every
+    filter) is checked separately by the executor — this is only the policy gate.
+
+    Bearish theses have no shares fallback (no shorting): anything short of the
+    option gates is 'skip', and the reason is journaled."""
+    bearish = t.get("direction") == "bearish"
+    fallback = ("skip", ) if bearish else ("shares", )
+
+    def _no(reason):
+        return fallback[0], reason
+
+    if not opt_enabled:
+        return _no("options_disabled")
+    if options_level < 2:
+        return _no("options_level")
+    if t["conviction"] < min_conviction:
+        return _no("conviction_below_bar")
+    cd = t.get("catalyst_date")
+    if not cd:
+        return _no("no_catalyst_date")
+    try:
+        cat = date.fromisoformat(str(cd))
+    except ValueError:
+        return _no("bad_catalyst_date")
+    if not (today <= cat <= date.fromisoformat(t["expires"])):
+        return _no("catalyst_outside_window")
+    if sleeve_room < min_premium:
+        return _no("sleeve_full")
+    return "option", None
+
+
+def sleeve_room(theses: list, capital: float, sleeve_cap_pct: float) -> float:
+    """Dollars of premium budget left in the options sleeve: cap minus the
+    entry premium of every open option position."""
+    open_premium = sum(
+        (t.get("entry_price") or 0) * (t.get("qty") or 0) * t.get("multiplier", 1)
+        for t in theses
+        if t.get("status") == "entered" and t.get("instrument") == "option")
+    return max(0.0, capital * sleeve_cap_pct - open_premium)
 
 
 def update_trail(t: dict, price: float, activate_pct: float) -> bool:
@@ -188,13 +275,21 @@ def daily_loss_halted(equity: float, last_equity: float, halt_pct: float) -> boo
 # Transitions
 # --------------------------------------------------------------------------
 
-def apply_fill(t: dict, fill_price: float, qty: float, order_id, today: date = None) -> dict:
+def apply_fill(t: dict, fill_price: float, qty: float, order_id, today: date = None,
+               instrument: str = "shares", option_meta: dict = None) -> dict:
+    """For options: fill_price is the PREMIUM per contract, qty is integer
+    contracts, option_meta = {contract, type, strike, expiry, entry_delta}."""
     if t["status"] != "active":
         raise ValueError(f"cannot enter thesis {t['id']} in status {t['status']}")
+    if instrument == "option" and not option_meta:
+        raise ValueError(f"option fill for {t['id']} needs option_meta")
     today = today or datetime.now(timezone.utc).date()
     t.update(status="entered", entered_at=_now_iso(), entry_price=float(fill_price),
              qty=float(qty), order_id=str(order_id) if order_id else None,
              hwm=float(fill_price), trailing=False,
+             instrument=instrument,
+             option=dict(option_meta) if option_meta else None,
+             multiplier=100 if instrument == "option" else 1,
              # TTL clock restarts at FILL: the pre-entry TTL decays unfilled
              # zones; once entered, the position gets its full ttl_days to play
              # out (CSW 7/21: written Fri, filled Mon, expired Tue = 1 day of
@@ -212,8 +307,38 @@ def apply_exit(t: dict, fill_price: float, reason: str) -> dict:
     t.update(status="closed", closed_at=_now_iso(), exit_price=float(fill_price),
              exit_reason=reason,
              pnl_pct=round((fill_price / entry - 1) * 100, 4) if entry else None,
-             pnl_dollars=round((fill_price - entry) * (t["qty"] or 0), 4))
+             pnl_dollars=round((fill_price - entry) * (t["qty"] or 0) * t.get("multiplier", 1), 4))
     return t
+
+
+def broker_symbol(t: dict) -> str:
+    """The symbol the BROKER knows this position by: the OSI contract for an
+    option thesis, the plain equity symbol otherwise."""
+    if t.get("instrument") == "option" and t.get("option"):
+        return t["option"]["contract"]
+    return t["symbol"]
+
+
+def reconcile_classify(entered: list, broker_qty: dict) -> tuple:
+    """Pure reconcile: match entered theses against broker positions by their
+    broker symbol (OSI contract for options).
+
+    Returns (missing, drifted, untracked):
+      missing   — theses with no broker position (close as reconcile_missing)
+      drifted   — (thesis, broker_qty) pairs where qty diverged (adopt broker)
+      untracked — broker symbols (equity or OSI) no thesis accounts for
+    """
+    missing, drifted = [], []
+    tracked = set()
+    for t in entered:
+        bsym = broker_symbol(t)
+        tracked.add(bsym)
+        if bsym not in broker_qty:
+            missing.append(t)
+        elif abs(broker_qty[bsym] - (t["qty"] or 0)) > 1e-6:
+            drifted.append((t, broker_qty[bsym]))
+    untracked = [s for s in broker_qty if s not in tracked]
+    return missing, drifted, untracked
 
 
 def apply_terminal(t: dict, status: str) -> dict:

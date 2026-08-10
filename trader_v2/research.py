@@ -50,18 +50,21 @@ RESEARCH_TOOL = {
                     "type": "object",
                     "properties": {
                         "symbol": {"type": "string"},
+                        "direction": {"type": "string", "enum": ["bullish", "bearish"]},
                         "conviction": {"type": "integer", "minimum": 1, "maximum": 5},
                         "entry_zone_low": {"type": "number"},
                         "entry_zone_high": {"type": "number"},
                         "invalidation_price": {"type": "number"},
                         "price_target": {"type": "number"},
                         "catalyst": {"type": "string"},
+                        "catalyst_date": {"type": "string",
+                                          "description": "YYYY-MM-DD of the dated catalyst (earnings, FDA date, event), or empty string if the catalyst has no specific date"},
                         "ttl_days": {"type": "integer", "minimum": 1, "maximum": 10},
                         "reasoning": {"type": "string"},
                     },
-                    "required": ["symbol", "conviction", "entry_zone_low", "entry_zone_high",
-                                 "invalidation_price", "price_target", "catalyst",
-                                 "ttl_days", "reasoning"],
+                    "required": ["symbol", "direction", "conviction", "entry_zone_low",
+                                 "entry_zone_high", "invalidation_price", "price_target",
+                                 "catalyst", "ttl_days", "reasoning"],
                 },
             },
             "market_notes": {"type": "string"},
@@ -95,13 +98,25 @@ POSTMORTEM_TOOL = {
 
 
 def _system_prompt(lessons: str) -> str:
-    return f"""You are the senior analyst for a small thesis-driven equity book. A deterministic
-executor trades your plan mechanically — you will never be consulted intraday, so every
-thesis must stand on its own until tomorrow night.
+    return f"""You are the senior analyst for a small thesis-driven book of stocks and options. A
+deterministic executor trades your plan mechanically — you will never be consulted
+intraday, so every thesis must stand on its own until tomorrow night.
+
+INSTRUMENT POLICY (fixed — the executor chooses, you never do):
+- You propose UNDERLYING theses only: symbol, direction, zones, catalyst, conviction.
+  Deterministic code decides shares vs. a long option and picks any contract.
+- A bullish thesis with conviction >= {V2Config.OPT_MIN_CONVICTION} AND a dated catalyst (catalyst_date) inside
+  the TTL may be expressed as a ~30-45 DTE near-the-money call; everything else
+  becomes shares. Set catalyst_date ONLY for genuinely dated events (earnings, FDA,
+  product launch) — an honest empty date beats a fabricated one.
+- Bearish theses can ONLY become long puts (no shorting). They are rejected unless
+  conviction >= {V2Config.OPT_MIN_CONVICTION} with a dated catalyst — do not propose bearish theses without both.
+  For a bearish thesis the zone is where the DECLINE starts: invalidation_price sits
+  ABOVE the zone (the rally that falsifies it), price_target BELOW it.
 
 EXECUTOR RULES (fixed — write theses that work WITH them):
-- Long only. It buys ONLY when price is inside your entry_zone. It never chases:
-  if price runs above the zone, the thesis just sits unfilled until you revise it tonight.
+- It buys ONLY when price is inside your entry_zone. It never chases:
+  if price runs beyond the zone, the thesis just sits unfilled until you revise it tonight.
 - Your invalidation_price is checked ONLY in the last ~25 min of each session (daily-bar
   discipline; intraday noise is ignored). A -{abs(V2Config.DISASTER_STOP_PCT)*100:.0f}% disaster stop from entry runs intraday.
 - Winners: once up {V2Config.TRAIL_ACTIVATE_PCT*100:.0f}%, a {abs(V2Config.TRAIL_STOP_PCT)*100:.0f}% trailing stop from the high-water mark takes over
@@ -269,14 +284,24 @@ def run_nightly(alpaca, llm, discovery, notif):
     entered_view = []
     for t in entered:
         price = closes.get(t["symbol"])
-        entered_view.append({
+        view = {
             "thesis_id": t["id"], "symbol": t["symbol"], "conviction": t["conviction"],
+            "direction": t.get("direction", "bullish"),
+            "instrument": t.get("instrument", "shares"),
             "entry_price": t["entry_price"], "current_close": price,
             "pnl_pct": round((price / t["entry_price"] - 1) * 100, 2) if price and t["entry_price"] else None,
             "invalidation_price": t["invalidation_price"], "expires": t["expires"],
             "trailing": t["trailing"], "hwm": t["hwm"],
             "catalyst": t["catalyst"], "reasoning": t["reasoning"],
-        })
+        }
+        if t.get("instrument") == "option" and t.get("option"):
+            # entry_price/pnl here are PREMIUM values; current_close is the
+            # underlying's close — the analyst judges the thesis on the
+            # underlying, the executor manages the premium mechanically.
+            view["option"] = {k: t["option"].get(k) for k in
+                              ("contract", "type", "strike", "expiry", "entry_delta")}
+            view["pnl_pct"] = None  # premium P&L isn't derivable from the underlying close
+        entered_view.append(view)
     unfilled_view = [{
         "symbol": t["symbol"], "conviction": t["conviction"], "entry_zone": t["entry_zone"],
         "expires": t["expires"], "catalyst": t["catalyst"],
@@ -345,7 +370,9 @@ def run_nightly(alpaca, llm, discovery, notif):
         err = th.validate_new_thesis(raw, closes.get(str(raw.get("symbol", "")).upper()),
                                      candidate_syms, entered_syms,
                                      blacklist=set(Config.BLACKLIST),
-                                     crypto_suffixes=tuple(Config.CRYPTO_SUFFIXES))
+                                     crypto_suffixes=tuple(Config.CRYPTO_SUFFIXES),
+                                     today=today,
+                                     opt_min_conviction=V2Config.OPT_MIN_CONVICTION)
         if err:
             errors.append(err)
         else:

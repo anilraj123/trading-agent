@@ -304,3 +304,285 @@ class TestLessonsBounding:
             assert store.read_lessons() == ""
         finally:
             store.LESSONS_FILE = orig
+
+# ---------------------------------------------------------------------------
+# Schema v2: direction, catalyst_date, instrument policy (overhaul PR2)
+# ---------------------------------------------------------------------------
+
+def bearish_thesis(**over):
+    base = dict(symbol="NVDA", direction="bearish", conviction=4,
+                entry_zone_low=172.0, entry_zone_high=178.5,
+                invalidation_price=185.0, price_target=155.0,
+                catalyst="earnings miss 8/14", catalyst_date="2026-07-20",
+                ttl_days=5, reasoning="test")
+    base.update(over)
+    return base
+
+
+class TestDirectionValidation:
+    def _ok(self, raw, close=175.0):
+        return th.validate_new_thesis(raw, close, CANDIDATES, set(),
+                                      today=TODAY, opt_min_conviction=4)
+
+    def test_bullish_default_direction(self):
+        t = th.build_thesis(raw_thesis(), TODAY)
+        assert t["direction"] == "bullish" and t["multiplier"] == 1
+        assert t["instrument"] is None and t["option"] is None
+
+    def test_bad_direction_rejected(self):
+        assert "bad direction" in self._ok(raw_thesis(direction="sideways"))
+
+    def test_bearish_happy_path(self):
+        assert self._ok(bearish_thesis()) is None
+
+    def test_bearish_inverted_geometry_enforced(self):
+        assert "must be above zone high" in self._ok(bearish_thesis(invalidation_price=170.0))
+        assert "must be below zone low" in self._ok(bearish_thesis(price_target=180.0))
+        assert "above zone" in self._ok(bearish_thesis(invalidation_price=210.0))  # >15% above
+
+    def test_bearish_requires_conviction_bar(self):
+        assert "conviction >= 4" in self._ok(bearish_thesis(conviction=3))
+
+    def test_bearish_requires_catalyst_date(self):
+        assert "dated catalyst" in self._ok(bearish_thesis(catalyst_date=None))
+        assert "dated catalyst" in self._ok(bearish_thesis(catalyst_date=""))
+
+    def test_catalyst_date_unparseable(self):
+        assert "unparseable" in self._ok(raw_thesis(catalyst_date="next tuesday"))
+
+    def test_catalyst_date_outside_ttl_window(self):
+        assert "outside" in self._ok(raw_thesis(catalyst_date="2026-09-01", ttl_days=5))
+        assert "outside" in self._ok(raw_thesis(catalyst_date="2026-07-01"))  # in the past
+
+    def test_catalyst_date_inside_window_ok(self):
+        assert self._ok(raw_thesis(catalyst_date="2026-07-20", ttl_days=5)) is None
+
+    def test_bullish_without_catalyst_date_still_fine(self):
+        assert self._ok(raw_thesis()) is None
+
+
+class TestChooseInstrument:
+    KW = dict(opt_enabled=True, min_conviction=4, min_premium=50.0)
+
+    def _active(self, **over):
+        t = th.build_thesis(raw_thesis(catalyst_date="2026-07-20"), TODAY)
+        t.update(over)
+        return t
+
+    def test_high_conviction_dated_catalyst_gets_option(self):
+        inst, why = th.choose_instrument(self._active(), TODAY, 2, 300.0, **self.KW)
+        assert (inst, why) == ("option", None)
+
+    def test_disabled_falls_to_shares(self):
+        kw = dict(self.KW, opt_enabled=False)
+        assert th.choose_instrument(self._active(), TODAY, 2, 300.0, **kw) == ("shares", "options_disabled")
+
+    def test_level_below_2(self):
+        assert th.choose_instrument(self._active(), TODAY, 1, 300.0, **self.KW) == ("shares", "options_level")
+
+    def test_conviction_below_bar(self):
+        t = self._active(conviction=3)
+        assert th.choose_instrument(t, TODAY, 2, 300.0, **self.KW) == ("shares", "conviction_below_bar")
+
+    def test_no_catalyst_date(self):
+        t = self._active(catalyst_date=None)
+        assert th.choose_instrument(t, TODAY, 2, 300.0, **self.KW) == ("shares", "no_catalyst_date")
+
+    def test_catalyst_past_window(self):
+        t = self._active(catalyst_date="2026-07-10")  # before TODAY
+        assert th.choose_instrument(t, TODAY, 2, 300.0, **self.KW) == ("shares", "catalyst_outside_window")
+
+    def test_sleeve_full(self):
+        assert th.choose_instrument(self._active(), TODAY, 2, 49.0, **self.KW) == ("shares", "sleeve_full")
+
+    def test_bearish_skips_instead_of_shares(self):
+        t = self._active(direction="bearish", conviction=3)
+        assert th.choose_instrument(t, TODAY, 2, 300.0, **self.KW) == ("skip", "conviction_below_bar")
+
+    def test_bearish_gets_put_policy_pass(self):
+        t = self._active(direction="bearish")
+        assert th.choose_instrument(t, TODAY, 2, 300.0, **self.KW) == ("option", None)
+
+
+class TestSleeveRoom:
+    def test_empty_book_full_room(self):
+        assert th.sleeve_room([], 1000.0, 0.35) == 350.0
+
+    def test_open_option_consumes(self):
+        opt_pos = make_entered(entry=2.40, qty=1.0, instrument="option", multiplier=100)
+        assert th.sleeve_room([opt_pos], 1000.0, 0.35) == 350.0 - 240.0
+
+    def test_shares_do_not_consume(self):
+        eq = make_entered(entry=100.0, qty=3.0, instrument="shares", multiplier=1)
+        assert th.sleeve_room([eq], 1000.0, 0.35) == 350.0
+
+    def test_floor_at_zero(self):
+        opt_pos = make_entered(entry=5.0, qty=1.0, instrument="option", multiplier=100)
+        assert th.sleeve_room([opt_pos], 1000.0, 0.35) == 0.0
+
+
+class TestStoreMigration:
+    def test_legacy_active_thesis_stamped(self):
+        import trader_v2.store as store
+        legacy = {"id": "T-X", "symbol": "NVDA", "status": "active"}
+        m = store._migrate_thesis(dict(legacy))
+        assert m["direction"] == "bullish" and m["multiplier"] == 1
+        assert m["instrument"] is None and m["option"] is None and m["catalyst_date"] is None
+
+    def test_legacy_entered_thesis_is_shares(self):
+        import trader_v2.store as store
+        m = store._migrate_thesis({"id": "T-X", "symbol": "NVDA", "status": "entered"})
+        assert m["instrument"] == "shares"
+
+    def test_migration_idempotent_preserves_v2_fields(self):
+        import trader_v2.store as store
+        t = {"id": "T-X", "symbol": "NVDA", "status": "entered",
+             "direction": "bearish", "instrument": "option", "multiplier": 100,
+             "option": {"contract": "NVDA260918P00170000", "type": "put"},
+             "catalyst_date": "2026-08-14"}
+        m = store._migrate_thesis(dict(t))
+        assert m == t
+
+
+class TestExitReasonsExtended:
+    def test_option_reasons_accepted_by_apply_exit(self):
+        for reason in ("premium_stop", "take_profit", "expiry_force_exit"):
+            t = make_entered(entry=2.40, qty=1.0)
+            th.apply_exit(t, 1.20, reason)
+            assert t["exit_reason"] == reason
+
+# ---------------------------------------------------------------------------
+# Executor options integration: fills, P&L x100, reconcile (overhaul PR3)
+# ---------------------------------------------------------------------------
+
+OPTION_META = {"contract": "NVDA260918C00185000", "type": "call",
+               "strike": 185.0, "expiry": "2026-09-18", "entry_delta": 0.52}
+
+
+def make_entered_option(entry=2.40, qty=1.0, **over):
+    t = th.build_thesis(raw_thesis(), TODAY)
+    th.apply_fill(t, entry, qty, "ord1", instrument="option", option_meta=OPTION_META)
+    t.update(over)
+    return t
+
+
+class TestOptionFill:
+    def test_fill_sets_option_fields(self):
+        t = make_entered_option()
+        assert t["instrument"] == "option" and t["multiplier"] == 100
+        assert t["option"]["contract"] == "NVDA260918C00185000"
+        assert t["entry_price"] == 2.40 and t["qty"] == 1.0
+
+    def test_option_fill_requires_meta(self):
+        t = th.build_thesis(raw_thesis(), TODAY)
+        try:
+            th.apply_fill(t, 2.40, 1.0, "ord1", instrument="option")
+            assert False, "should have raised"
+        except ValueError as e:
+            assert "option_meta" in str(e)
+
+    def test_shares_fill_unchanged(self):
+        t = th.build_thesis(raw_thesis(), TODAY)
+        th.apply_fill(t, 100.0, 3.0, "ord1")
+        assert t["instrument"] == "shares" and t["multiplier"] == 1 and t["option"] is None
+
+
+class TestOptionPnl:
+    def test_pnl_uses_100_multiplier(self):
+        t = make_entered_option(entry=2.40, qty=2.0)
+        th.apply_exit(t, 3.00, "take_profit")
+        assert t["pnl_dollars"] == round((3.00 - 2.40) * 2 * 100, 4)  # $120
+        assert t["pnl_pct"] == 25.0
+
+    def test_shares_pnl_multiplier_1(self):
+        t = make_entered(entry=100.0, qty=3.0)
+        th.apply_exit(t, 110.0, "trailing_stop")
+        assert t["pnl_dollars"] == 30.0
+
+    def test_loss_pnl(self):
+        t = make_entered_option(entry=2.40, qty=1.0)
+        th.apply_exit(t, 1.20, "premium_stop")
+        assert t["pnl_dollars"] == -120.0 and t["pnl_pct"] == -50.0
+
+
+class TestBrokerSymbol:
+    def test_option_uses_contract(self):
+        assert th.broker_symbol(make_entered_option()) == "NVDA260918C00185000"
+
+    def test_shares_uses_symbol(self):
+        assert th.broker_symbol(make_entered()) == "NVDA"
+
+
+class TestReconcileClassify:
+    def test_mixed_book_all_matched(self):
+        eq = make_entered(entry=100.0, qty=3.0)
+        op = make_entered_option(qty=1.0)
+        broker = {"NVDA": 3.0, "NVDA260918C00185000": 1.0}
+        missing, drifted, untracked = th.reconcile_classify([eq, op], broker)
+        assert missing == [] and drifted == [] and untracked == []
+
+    def test_option_position_not_untracked(self):
+        op = make_entered_option(qty=1.0)
+        _, _, untracked = th.reconcile_classify([op], {"NVDA260918C00185000": 1.0})
+        assert untracked == []
+
+    def test_missing_option(self):
+        op = make_entered_option()
+        missing, _, _ = th.reconcile_classify([op], {})
+        assert missing == [op]
+
+    def test_qty_drift_option(self):
+        op = make_entered_option(qty=2.0)
+        _, drifted, _ = th.reconcile_classify([op], {"NVDA260918C00185000": 1.0})
+        assert drifted == [(op, 1.0)]
+
+    def test_truly_untracked_flagged(self):
+        eq = make_entered(entry=100.0, qty=3.0)
+        _, _, untracked = th.reconcile_classify(
+            [eq], {"NVDA": 3.0, "TSLA": 5.0, "SPY260918P00500000": 1.0})
+        assert set(untracked) == {"TSLA", "SPY260918P00500000"}
+
+    def test_equity_same_underlying_as_option_is_distinct(self):
+        # Holding NVDA shares while the thesis holds an NVDA call: the shares
+        # are untracked (v2 didn't buy them), the call is matched.
+        op = make_entered_option(qty=1.0)
+        missing, drifted, untracked = th.reconcile_classify(
+            [op], {"NVDA260918C00185000": 1.0, "NVDA": 10.0})
+        assert missing == [] and drifted == [] and untracked == ["NVDA"]
+
+# ---------------------------------------------------------------------------
+# PDT guard — dormant on cash accounts, armed on margin (overhaul PR4)
+# ---------------------------------------------------------------------------
+
+from trader_v2 import guards
+
+
+class TestPdtExitBlocked:
+    TODAY_ISO = "2026-08-10"
+
+    def test_multiday_hold_never_blocked(self):
+        for reason in th.EXIT_REASONS:
+            assert not guards.pdt_exit_blocked("2026-08-07", self.TODAY_ISO, 3, reason)
+
+    def test_cash_account_null_count_never_blocked(self):
+        assert not guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, None, "trailing_stop")
+
+    def test_noncritical_deferred_at_soft_max(self):
+        for reason in ("trailing_stop", "take_profit", "research_close",
+                       "ttl_expiry", "invalidation"):
+            assert not guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, 1, reason)
+            assert guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, 2, reason)
+
+    def test_critical_allowed_through_third_blocked_at_fourth(self):
+        for reason in guards.CRITICAL_EXITS:
+            assert not guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, 2, reason)
+            assert guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, 3, reason)
+
+    def test_soft_max_configurable(self):
+        assert not guards.pdt_exit_blocked(self.TODAY_ISO, self.TODAY_ISO, 2,
+                                           "take_profit", soft_max=3)
+
+    def test_entry_blocked_at_three(self):
+        assert not guards.pdt_entry_blocked(2)
+        assert guards.pdt_entry_blocked(3)
+        assert not guards.pdt_entry_blocked(None)
