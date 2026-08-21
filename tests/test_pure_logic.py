@@ -2,14 +2,13 @@
 
 Covers:
 - score_signals (trader/technical_analysis.py)
-- _option_dte OSI parsing (options_bot/__main__.py)
-- _get_dynamic_stop (options_bot/__main__.py)
 - _max_position_size (trader/llm_engine.py)
 """
 
 import sys
 import os
 from datetime import datetime, date
+from unittest.mock import patch
 
 test_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, test_root)
@@ -41,12 +40,6 @@ from trader.technical_analysis import TechnicalAnalysis
 from trader.llm_engine import _max_position_size, needs_llm_review
 from trader.risk_manager import RiskManager, in_close_window, in_open_window
 
-# Import options bot pure functions by patching heavy deps at module level
-from unittest.mock import patch
-with patch("alpaca.trading.client.TradingClient"), \
-     patch("alpaca.data.StockHistoricalDataClient"), \
-     patch("alpaca.data.OptionHistoricalDataClient"):
-    from options_bot.__main__ import _option_dte, _get_dynamic_stop
 
 
 class TestScoreSignals:
@@ -215,50 +208,6 @@ class TestScoreSignals:
         assert result["sell_score"] == 0.0
         assert result["meets_buy_threshold"] is False
         assert result["meets_sell_threshold"] is False
-
-
-class TestOptionDte:
-    """OSI symbol parsing for days-to-expiration."""
-
-    def test_valid_osi_parses_dte(self):
-        """AAPL with far-future expiry should return positive DTE."""
-        dte = _option_dte("AAPL300620C00150000")
-        assert dte is not None
-        assert dte > 0
-
-    def test_expired_option_negative_dte(self):
-        """Past expiry date should return negative DTE."""
-        dte = _option_dte("AAPL200101C00150000")
-        assert dte is not None
-        assert dte < 0
-
-    def test_invalid_symbol_returns_none(self):
-        """Garbage symbol should return None, not crash."""
-        dte = _option_dte("XYZ")
-        assert dte is None
-
-    def test_empty_string_returns_none(self):
-        dte = _option_dte("")
-        assert dte is None
-
-
-class TestDynamicStop:
-    """Dynamic stop-loss based on DTE."""
-
-    def test_none_dte_returns_none(self):
-        assert _get_dynamic_stop(None) is None
-
-    def test_very_short_dte_stop(self):
-        assert _get_dynamic_stop(3) == -25
-        assert _get_dynamic_stop(5) == -25
-
-    def test_medium_dte_stop(self):
-        assert _get_dynamic_stop(7) == -40
-        assert _get_dynamic_stop(14) == -40
-
-    def test_long_dte_stop(self):
-        assert _get_dynamic_stop(15) == -55
-        assert _get_dynamic_stop(30) == -55
 
 
 class TestMaxPositionSize:

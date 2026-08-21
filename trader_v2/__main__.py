@@ -140,8 +140,12 @@ class V2Bot:
         baseline = store.load_baseline()
         equity = self.alpaca.get_portfolio_value()
         pnl = equity - baseline["equity"]
-        v2_value = V2Config.CAPITAL + pnl
-        v2_return = pnl / V2Config.CAPITAL * 100
+        # dynamic mode: the account IS the book, so report against the equity
+        # at baseline; static mode keeps the V2_CAPITAL apples-to-apples base.
+        capital_base = (baseline["equity"] if V2Config.CAPITAL_MODE == "dynamic"
+                        else V2Config.CAPITAL)
+        v2_value = capital_base + pnl
+        v2_return = pnl / capital_base * 100
 
         spy_line = "SPY benchmark unavailable"
         alpha_line = ""
@@ -153,7 +157,7 @@ class V2Bot:
             if bars is not None and len(bars) > 1:
                 closes = {ts[1].date() if isinstance(ts, tuple) else ts.date(): float(c)
                           for ts, c in bars["close"].items()}
-                spy_value, spy_total = spy_buy_and_hold([(start, V2Config.CAPITAL)], closes)
+                spy_value, spy_total = spy_buy_and_hold([(start, capital_base)], closes)
                 if spy_total > 0:
                     spy_ret = (spy_value / spy_total - 1) * 100
                     alpha = v2_return - spy_ret
@@ -186,7 +190,7 @@ class V2Bot:
         waiting = [t["symbol"] for t in theses if t["status"] == "active"]
 
         msg = (f"DAILY — {session_date.strftime('%b %d')}\n"
-               f"V2 value: ${v2_value:.2f} on ${V2Config.CAPITAL:.0f} ({v2_return:+.2f}%)\n"
+               f"V2 value: ${v2_value:.2f} on ${capital_base:.0f} ({v2_return:+.2f}%)\n"
                f"{spy_line}\n{alpha_line}\n"
                + (f"{v1_line}\n" if v1_line else "")
                + f"Positions: {', '.join(pos_lines) or 'none'}\n"
@@ -219,7 +223,10 @@ class V2Bot:
         except Exception as e:
             logger.warning(f"startup catch-up skipped: {e}")
 
-        self.notif.send(f"trader_v2 started (paper). Capital base ${V2Config.CAPITAL:.0f}, "
+        live = "paper-api" not in Config.ALPACA_BASE_URL
+        sizing = ("dynamic (live equity)" if V2Config.CAPITAL_MODE == "dynamic"
+                  else f"static ${V2Config.CAPITAL:.0f}")
+        self.notif.send(f"trader_v2 started ({'LIVE' if live else 'paper'}). Capital base {sizing}, "
                         f"max {V2Config.MAX_POSITIONS} positions, "
                         f"trading {'ENABLED' if V2Config.TRADING_ENABLED else 'DISABLED (observe-only)'}",
                         priority="low")
