@@ -65,3 +65,4 @@ send_comparison.py
 rclone-config/
 
 *.tar.gz
+STATUS.md
