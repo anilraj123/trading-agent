@@ -1,37 +1,8 @@
+# LIVE cutover 2026-08-21: trader_v2 IS the trading system, running the full
+# real-money account. The v1 equity bot and options_bot services are retired
+# (trader/ remains as a shared library that trader_v2 imports). Rollback and
+# runbook: CUTOVER.md.
 services:
-  trading-agent:
-    build: .
-    container_name: trading-agent
-    restart: unless-stopped
-    env_file:
-      - .env
-    volumes:
-      - ./rclone-config:/root/.config/rclone
-      - ./data:/app/data
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  options-bot:
-    build: .
-    container_name: options-bot
-    restart: unless-stopped
-    env_file:
-      - .env
-    command: python -m options_bot
-    volumes:
-      - ./data:/app/data
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  # trader_v2: thesis-driven bot, PAPER account only. The environment block
-  # overrides .env so v2 gets paper keys, isolated state (data/v2/), and its
-  # own ntfy topic — no source changes, no risk to the live bots.
   trader-v2:
     build: .
     container_name: trader-v2
@@ -40,14 +11,20 @@ services:
       - .env
     command: python -m trader_v2
     environment:
-      ALPACA_API_KEY: ${ALPACA_PAPER_API_KEY}
-      ALPACA_SECRET_KEY: ${ALPACA_PAPER_SECRET_KEY}
-      ALPACA_BASE_URL: https://paper-api.alpaca.markets
-      DATA_DIR: /app/data/v2
+      # Live keys come from .env (ALPACA_API_KEY/SECRET). The explicit live
+      # endpoint + V2_REQUIRE_PAPER=false here make going live a deliberate,
+      # reviewed act — trader_v2 crashes at startup on any mismatch.
+      ALPACA_BASE_URL: https://api.alpaca.markets
+      V2_REQUIRE_PAPER: "false"
+      V2_CAPITAL_MODE: dynamic
+      DATA_DIR: /app/data/v2live
       NOTIFY_PROVIDER: ntfy
       NOTIFY_NTFY_TOPIC: ${V2_NTFY_TOPIC:-trading-agent}
       EMAIL_ENABLED: "false"
     volumes:
+      # rclone config is used by the nightly host-cron backup, which execs
+      # rclone inside this container (backup-data.sh on the droplet).
+      - ./rclone-config:/root/.config/rclone
       - ./data:/app/data
     logging:
       driver: json-file
