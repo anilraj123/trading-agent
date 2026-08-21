@@ -48,6 +48,11 @@ def build_thesis(raw: dict, today: date) -> dict:
         "price_target": float(raw["price_target"]),   # advisory only — exits are trail/invalidation
         "catalyst": str(raw["catalyst"]),
         "catalyst_date": raw.get("catalyst_date") or None,   # ISO date or None
+        # The analyst's requested expression. Bearish is always "option" (puts
+        # are its only expression); bullish defaults to shares. The executor's
+        # choose_instrument gate can still downgrade an option request.
+        "requested_instrument": ("option" if raw.get("direction") == "bearish"
+                                 else (raw.get("instrument") or "shares")),
         "ttl_days": int(raw["ttl_days"]),
         "reasoning": str(raw["reasoning"]),
         "status": "active",
@@ -74,8 +79,8 @@ def validate_new_thesis(raw: dict, last_close: float, candidate_symbols: set,
 
     Direction-aware: bullish geometry is invalidation < zone < target (long
     shares or calls); bearish inverts to target < zone < invalidation (long
-    puts — the ONLY bearish expression, so bearish additionally requires a
-    dated catalyst and conviction >= opt_min_conviction)."""
+    puts — the ONLY bearish expression, so bearish additionally requires
+    conviction >= opt_min_conviction)."""
     try:
         sym = str(raw["symbol"]).upper()
         direction = str(raw.get("direction", "bullish"))
@@ -90,6 +95,11 @@ def validate_new_thesis(raw: dict, last_close: float, candidate_symbols: set,
 
     if direction not in DIRECTIONS:
         return f"{sym}: bad direction {direction!r}"
+    instrument = raw.get("instrument") or "shares"
+    if instrument not in ("shares", "option"):
+        return f"{sym}: bad instrument {instrument!r}"
+    if direction == "bearish" and raw.get("instrument") == "shares":
+        return f"{sym}: bearish cannot be shares (long puts are its only expression)"
     if sym not in candidate_symbols:
         return f"{sym}: not in tonight's candidate set (hallucinated?)"
     if sym in blacklist:
@@ -126,8 +136,6 @@ def validate_new_thesis(raw: dict, last_close: float, candidate_symbols: set,
             return f"{sym}: bearish target {target} must be below zone low {lo}"
         if conviction < opt_min_conviction:
             return f"{sym}: bearish needs conviction >= {opt_min_conviction} (puts are its only expression)"
-        if not raw.get("catalyst_date"):
-            return f"{sym}: bearish needs a dated catalyst (puts are its only expression)"
 
     cat_date = raw.get("catalyst_date")
     if cat_date:
@@ -185,10 +193,11 @@ def position_size(capital: float, max_positions: int, cap_pct: float,
 def choose_instrument(t: dict, today: date, options_level: int, sleeve_room: float,
                       *, opt_enabled: bool, min_conviction: int, min_premium: float) -> tuple:
     """('shares' | 'option' | 'skip', reason | None) for an active thesis at
-    entry time. Deterministic policy: shares are the default expression; an
-    option is leverage reserved for high-conviction, catalyst-dated theses the
-    account can actually trade. Contract viability (a real chain passing every
-    filter) is checked separately by the executor — this is only the policy gate.
+    entry time. Thesis-driven policy: the analyst requests the expression per
+    thesis (requested_instrument); an option request must still clear the
+    deterministic gates (conviction bar, account level, sleeve room). Contract
+    viability (a real chain passing every filter) is checked separately by the
+    executor — this is only the policy gate.
 
     Bearish theses have no shares fallback (no shorting): anything short of the
     option gates is 'skip', and the reason is journaled."""
@@ -198,21 +207,17 @@ def choose_instrument(t: dict, today: date, options_level: int, sleeve_room: flo
     def _no(reason):
         return fallback[0], reason
 
+    # Bearish is inherently an option request; legacy theses without the field
+    # (pre-schema records still in the book) default to shares.
+    requested = t.get("requested_instrument") or ("option" if bearish else "shares")
+    if requested != "option":
+        return _no("not_requested")
     if not opt_enabled:
         return _no("options_disabled")
     if options_level < 2:
         return _no("options_level")
     if t["conviction"] < min_conviction:
         return _no("conviction_below_bar")
-    cd = t.get("catalyst_date")
-    if not cd:
-        return _no("no_catalyst_date")
-    try:
-        cat = date.fromisoformat(str(cd))
-    except ValueError:
-        return _no("bad_catalyst_date")
-    if not (today <= cat <= date.fromisoformat(t["expires"])):
-        return _no("catalyst_outside_window")
     if sleeve_room < min_premium:
         return _no("sleeve_full")
     return "option", None

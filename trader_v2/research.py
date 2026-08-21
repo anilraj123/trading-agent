@@ -59,6 +59,8 @@ RESEARCH_TOOL = {
                         "catalyst": {"type": "string"},
                         "catalyst_date": {"type": "string",
                                           "description": "YYYY-MM-DD of the dated catalyst (earnings, FDA date, event), or empty string if the catalyst has no specific date"},
+                        "instrument": {"type": "string", "enum": ["shares", "option"],
+                                       "description": "How to express the thesis: 'shares' (default) or 'option' (a ~30-45 DTE near-the-money long call/put). Request 'option' only when you expect a decisive move within the TTL. Bearish theses are always options (long puts)."},
                         "ttl_days": {"type": "integer", "minimum": 1, "maximum": 10},
                         "reasoning": {"type": "string"},
                     },
@@ -102,17 +104,21 @@ def _system_prompt(lessons: str) -> str:
 deterministic executor trades your plan mechanically — you will never be consulted
 intraday, so every thesis must stand on its own until tomorrow night.
 
-INSTRUMENT POLICY (fixed — the executor chooses, you never do):
-- You propose UNDERLYING theses only: symbol, direction, zones, catalyst, conviction.
-  Deterministic code decides shares vs. a long option and picks any contract.
-- A bullish thesis with conviction >= {V2Config.OPT_MIN_CONVICTION} AND a dated catalyst (catalyst_date) inside
-  the TTL may be expressed as a ~30-45 DTE near-the-money call; everything else
-  becomes shares. Set catalyst_date ONLY for genuinely dated events (earnings, FDA,
-  product launch) — an honest empty date beats a fabricated one.
-- Bearish theses can ONLY become long puts (no shorting). They are rejected unless
-  conviction >= {V2Config.OPT_MIN_CONVICTION} with a dated catalyst — do not propose bearish theses without both.
-  For a bearish thesis the zone is where the DECLINE starts: invalidation_price sits
-  ABOVE the zone (the rally that falsifies it), price_target BELOW it.
+INSTRUMENT POLICY (you choose the expression; deterministic gates still apply):
+- Each thesis carries "instrument": "shares" (the default) or "option". An option
+  is one ~30-45 DTE near-the-money contract — a call for bullish, a put for bearish.
+  Deterministic code picks the actual contract (delta/OI/spread filters) and will
+  fall back to shares (bullish) or skip (bearish) if your option request fails a
+  gate: conviction >= {V2Config.OPT_MIN_CONVICTION}, account options level, premium sleeve room, viable contract.
+- Request "option" ONLY when you expect a DECISIVE move within the TTL — theta makes
+  a slow-drift thesis lose money even when directionally right. A dated catalyst
+  (earnings, FDA, launch) is the strongest case; a sharp, volume-confirmed momentum
+  setup can also qualify. Set catalyst_date ONLY for genuinely dated events — an
+  honest empty date beats a fabricated one.
+- Bearish theses can ONLY become long puts (no shorting) and are rejected below
+  conviction {V2Config.OPT_MIN_CONVICTION} — do not propose low-conviction bearish theses. For a bearish thesis
+  the zone is where the DECLINE starts: invalidation_price sits ABOVE the zone (the
+  rally that falsifies it), price_target BELOW it.
 
 EXECUTOR RULES (fixed — write theses that work WITH them):
 - It buys ONLY when price is inside your entry_zone. It never chases:
@@ -305,6 +311,7 @@ def run_nightly(alpaca, llm, discovery, notif):
     unfilled_view = [{
         "symbol": t["symbol"], "conviction": t["conviction"], "entry_zone": t["entry_zone"],
         "expires": t["expires"], "catalyst": t["catalyst"],
+        "instrument": t.get("requested_instrument", "shares"),
         "last_skip": t.get("last_skip"),
     } for t in actives]
 
