@@ -39,6 +39,8 @@ def _migrate_thesis(t: dict) -> dict:
     Legacy theses are all long equity, so an entered one is 'shares'."""
     t.setdefault("direction", "bullish")
     t.setdefault("catalyst_date", None)
+    t.setdefault("requested_instrument",
+                 "option" if t.get("direction") == "bearish" else "shares")
     t.setdefault("instrument", "shares" if t.get("status") == "entered" else None)
     t.setdefault("option", None)
     t.setdefault("multiplier", 1)
