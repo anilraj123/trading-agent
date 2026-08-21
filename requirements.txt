@@ -7,3 +7,5 @@ schedule==1.2.2
 rich==13.9.4
 requests==2.33.1
 beautifulsoup4==4.12.3
+
+pytest>=8
