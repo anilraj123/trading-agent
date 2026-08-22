@@ -72,6 +72,22 @@ def journal(evt: dict):
         f.write(json.dumps(evt) + "\n")
 
 
+def journal_start_ts() -> str:
+    """Timestamp of the FIRST event in the journal, or "" when there is none.
+    Lets a reader distinguish 'nothing happened' from 'the journal does not go
+    back that far' (fresh DATA_DIR after a cutover/migration)."""
+    try:
+        with open(JOURNAL_FILE) as f:
+            for line in f:
+                try:
+                    return json.loads(line).get("ts", "") or ""
+                except json.JSONDecodeError:
+                    continue
+    except FileNotFoundError:
+        pass
+    return ""
+
+
 def read_journal_since(ts_iso: str, events: list = None) -> list:
     out = []
     try:
