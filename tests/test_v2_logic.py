@@ -621,3 +621,65 @@ class TestPdtExitBlocked:
         assert not guards.pdt_entry_blocked(2)
         assert guards.pdt_entry_blocked(3)
         assert not guards.pdt_entry_blocked(None)
+
+
+class TestCapitalBase:
+    """One capital anchor for the executor AND the analyst prompt. Live
+    artifact (first night, 2026-08-21): research told the analyst $1350 while
+    the dynamic-mode executor sized on $1032 of real equity."""
+
+    def _mode(self, mode):
+        from trader_v2.config import V2Config
+        return V2Config, mode
+
+    def test_dynamic_uses_equity(self, monkeypatch):
+        from trader_v2.config import V2Config
+        monkeypatch.setattr(V2Config, "CAPITAL_MODE", "dynamic")
+        assert V2Config.capital_base(1031.95) == 1031.95
+
+    def test_static_ignores_equity(self, monkeypatch):
+        from trader_v2.config import V2Config
+        monkeypatch.setattr(V2Config, "CAPITAL_MODE", "static")
+        assert V2Config.capital_base(1031.95) == V2Config.CAPITAL
+
+    def test_dynamic_falls_back_when_equity_missing(self, monkeypatch):
+        from trader_v2.config import V2Config
+        monkeypatch.setattr(V2Config, "CAPITAL_MODE", "dynamic")
+        assert V2Config.capital_base(None) == V2Config.CAPITAL
+        assert V2Config.capital_base(0) == V2Config.CAPITAL
+
+
+class TestWeeklyCoverageNote:
+    """The weekly reviewer must not read a fresh journal as a month of
+    inactivity (first live weekly review minted a false lesson that way)."""
+
+    CUTOFF = "2026-07-24T00:00:00Z"
+
+    def test_empty_journal(self):
+        from trader_v2.research import coverage_note
+        note = coverage_note("", self.CUTOFF, 0)
+        assert "EMPTY" in note and "Do not draw" in note
+
+    def test_partial_coverage_fresh_journal(self):
+        from trader_v2.research import coverage_note
+        note = coverage_note("2026-08-21T22:00:00Z", self.CUTOFF, 2)
+        assert "PART" in note and "inactivity" in note
+
+    def test_full_coverage(self):
+        from trader_v2.research import coverage_note
+        note = coverage_note("2026-07-01T00:00:00Z", self.CUTOFF, 150)
+        assert "full 28-day window" in note
+
+    def test_journal_start_ts_empty_and_missing(self, tmp_path):
+        import trader_v2.store as store
+        orig = store.JOURNAL_FILE
+        try:
+            store.JOURNAL_FILE = str(tmp_path / "nope.jsonl")
+            assert store.journal_start_ts() == ""
+            p = tmp_path / "j.jsonl"
+            p.write_text('{"ts": "2026-08-21T22:01:38Z", "event": "research_run"}\n'
+                         '{"ts": "2026-08-21T23:00:00Z", "event": "heartbeat"}\n')
+            store.JOURNAL_FILE = str(p)
+            assert store.journal_start_ts() == "2026-08-21T22:01:38Z"
+        finally:
+            store.JOURNAL_FILE = orig

@@ -315,8 +315,17 @@ def run_nightly(alpaca, llm, discovery, notif):
         "last_skip": t.get("last_skip"),
     } for t in actives]
 
+    # The analyst reasons about sizing against this number, so it must be the
+    # SAME anchor the executor sizes orders with (capital_base honours
+    # V2_CAPITAL_MODE) — not the static default. First live night: analyst was
+    # told $1350 while the executor sized on $1032 of real equity.
+    try:
+        capital = V2Config.capital_base(alpaca.get_portfolio_value())
+    except Exception as e:
+        logger.warning(f"equity fetch for research prompt failed: {e}")
+        capital = V2Config.CAPITAL
     user = json.dumps({
-        "account": {"capital": V2Config.CAPITAL,
+        "account": {"capital": round(capital, 2),
                     "max_theses": V2Config.MAX_THESES,
                     "max_positions": V2Config.MAX_POSITIONS,
                     "entered_positions": len(entered)},
@@ -416,6 +425,25 @@ def run_nightly(alpaca, llm, discovery, notif):
 # Weekly deep review (Opus)
 # ---------------------------------------------------------------------------
 
+def coverage_note(journal_start: str, cutoff_iso: str, n_events: int) -> str:
+    """One line telling the weekly reviewer how much of the 28-day window the
+    journal actually covers. A journal that begins INSIDE the window (fresh
+    DATA_DIR after a cutover/migration) must not be read as a month of
+    inactivity — on the first live weekly review, Opus did exactly that:
+    treated an hours-old journal as 'a month with zero trades', minted a false
+    lesson from it, and dropped a true one whose evidence predated the file."""
+    if not journal_start:
+        return ("JOURNAL COVERAGE: the journal is EMPTY — there is NO activity data at all. "
+                "Do not draw any conclusion about trading frequency or filter behavior.")
+    if journal_start > cutoff_iso:
+        return (f"JOURNAL COVERAGE: the journal only begins at {journal_start} — it covers "
+                f"PART of the 28-day window (fresh data dir, e.g. after a cutover). Events "
+                f"before that are in a prior journal you cannot see. Do not interpret the "
+                f"missing period as inactivity, and do not drop lessons whose evidence "
+                f"predates {journal_start}. {n_events} events follow.")
+    return f"JOURNAL COVERAGE: full 28-day window covered ({n_events} events)."
+
+
 def run_weekly(llm, notif):
     # trailing 4 weeks of journal, compacted
     from datetime import timedelta
@@ -428,12 +456,16 @@ def run_weekly(llm, notif):
              if e.get(k) is not None}
         compact.append(c)
     system = ("You are the weekly strategy reviewer for a thesis-driven equity bot. Review the "
-              "trailing month of activity and the current lessons file. Output EXACTLY two "
+              "trailing month of activity and the current lessons file. Honour the JOURNAL "
+              "COVERAGE line: a period the journal does not cover is UNKNOWN, not inactive, "
+              "and lessons whose evidence predates the journal must be kept, not dropped. "
+              "Output EXACTLY two "
               "sections:\n=== OBSERVATIONS ===\n(strategy-level observations, what is/isn't "
               "working, 5-10 bullets)\n=== LESSONS ===\n(the COMPLETE rewritten lessons file: "
               "curated, deduplicated, max 20 bullets, keep the '- [date] lesson (evidence: ...)' "
               "format, drop stale or disproven lessons)")
-    user = (f"CURRENT LESSONS FILE:\n{store.read_lessons() or '(none)'}\n\n"
+    user = (f"{coverage_note(store.journal_start_ts(), cutoff, len(events))}\n\n"
+            f"CURRENT LESSONS FILE:\n{store.read_lessons() or '(none)'}\n\n"
             f"LAST 4 WEEKS OF EVENTS:\n{json.dumps(compact, indent=0)}")
     text = llm.call(system=system, messages=[{"role": "user", "content": user}],
                     model=V2Config.WEEKLY_MODEL, temperature=None, max_tokens=2500)

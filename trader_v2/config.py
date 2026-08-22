@@ -64,6 +64,17 @@ class V2Config:
     # dynamic: sizing anchored to live account equity each cycle.
     CAPITAL_MODE = os.getenv("V2_CAPITAL_MODE", "static")
 
+    @staticmethod
+    def capital_base(equity) -> float:
+        """The one capital anchor every consumer must use: live equity in
+        dynamic mode, the static V2_CAPITAL otherwise. The executor, the
+        research prompt, and reporting must all agree on this number — the
+        first live night showed the analyst being told $1350 while the
+        executor sized on $1032."""
+        if V2Config.CAPITAL_MODE == "dynamic" and equity:
+            return float(equity)
+        return V2Config.CAPITAL
+
     # --- research -----------------------------------------------------------
     # Sonnet 5: better analyst, intro pricing ($2/$10 per MTok) through 2026-08-31.
     # NOTE: Sonnet 5 rejects non-default sampling params — every call site must

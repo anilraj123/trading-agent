@@ -239,7 +239,7 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
 
     # --- 5. entries ---------------------------------------------------------
     # capital anchor: static V2_CAPITAL (paper apples-to-apples) or live equity
-    capital = equity if V2Config.CAPITAL_MODE == "dynamic" else V2Config.CAPITAL
+    capital = V2Config.capital_base(equity)
     options_level = level_now
     if not halted and not kill_switch:
         entered_count = len([t for t in theses if t["status"] == "entered"])
