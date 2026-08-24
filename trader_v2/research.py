@@ -271,6 +271,16 @@ def _assemble_candidates(alpaca, discovery, book_symbols):
 # Nightly research
 # ---------------------------------------------------------------------------
 
+def kept_count(entered: list) -> int:
+    """How many entered positions survive tonight's decisions — journalled as
+    `research_run.n_kept`, attribution data the weekly reviewer reads. The
+    original expression was `len(entered) - len(decided) + len(decided)`,
+    which cancels to `len(entered)` and reported every held position as kept
+    even on close-everything nights (found by the AM analyst routine,
+    2026-08-24). A position is kept iff research did not flag it for close."""
+    return len([t for t in entered if not t.get("pending_close")])
+
+
 def run_nightly(alpaca, llm, discovery, notif):
     run_postmortem(llm, notif)
 
@@ -355,14 +365,12 @@ def run_nightly(alpaca, llm, discovery, notif):
 
     # --- position decisions -------------------------------------------------
     by_id = {t["id"]: t for t in entered}
-    decided = set()
     for d in result.get("position_decisions", []):
         t = by_id.get(d.get("thesis_id"))
         if t is None:
             store.journal(th.event("error", where="position_decision",
                                    message=f"unknown thesis_id {d.get('thesis_id')}"))
             continue
-        decided.add(t["id"])
         action = d.get("action")
         if action == "close":
             t["pending_close"] = True
@@ -409,7 +417,7 @@ def run_nightly(alpaca, llm, discovery, notif):
     new_book = [t for t in theses if t["status"] == "entered"] + selected
     store.save_theses(new_book)
     store.journal(th.event("research_run", model=llm.last_model, usage=llm.last_usage,
-                           n_new=len(selected), n_kept=len(entered) - len(decided) + len(decided),
+                           n_new=len(selected), n_kept=kept_count(entered),
                            n_cancelled=len(actives), n_rejected=len(errors),
                            validation_errors=errors,
                            market_notes=str(result.get("market_notes", ""))[:500]))

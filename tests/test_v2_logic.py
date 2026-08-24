@@ -683,3 +683,37 @@ class TestWeeklyCoverageNote:
             assert store.journal_start_ts() == "2026-08-21T22:01:38Z"
         finally:
             store.JOURNAL_FILE = orig
+
+
+class TestResearchKeptCount:
+    """`research_run.n_kept` is attribution data the weekly reviewer reads, so
+    it must mean what it says. The old expression cancelled to len(entered) and
+    reported every held position as kept even on close-everything nights."""
+
+    def _entered(self, pending_close):
+        t = th.build_thesis(raw_thesis(), TODAY)
+        th.apply_fill(t, 100.0, 1.0, "oid", today=TODAY)
+        t["pending_close"] = pending_close
+        return t
+
+    def test_empty_book(self):
+        from trader_v2.research import kept_count
+        assert kept_count([]) == 0
+
+    def test_all_kept(self):
+        from trader_v2.research import kept_count
+        assert kept_count([self._entered(False), self._entered(False)]) == 2
+
+    def test_close_everything_night(self):
+        from trader_v2.research import kept_count
+        assert kept_count([self._entered(True), self._entered(True)]) == 0
+
+    def test_mixed(self):
+        from trader_v2.research import kept_count
+        assert kept_count([self._entered(True), self._entered(False)]) == 1
+
+    def test_missing_flag_counts_as_kept(self):
+        from trader_v2.research import kept_count
+        t = self._entered(False)
+        del t["pending_close"]
+        assert kept_count([t]) == 1
