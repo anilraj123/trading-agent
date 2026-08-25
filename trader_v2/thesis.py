@@ -164,6 +164,24 @@ def select_theses(validated: list, capacity: int) -> list:
 # Executor decisions
 # --------------------------------------------------------------------------
 
+def zone_gap_pct(entry_zone, last_close):
+    """Signed distance from `last_close` to the NEAREST edge of `entry_zone`,
+    as a fraction of the close; 0.0 when the close is inside the zone. Negative
+    = zone entirely below the close (fills only on a pullback), positive = zone
+    entirely above (fills only on a breakout). Journalled on `thesis_created`
+    so zone reachability is measurable across nights — the first live week
+    minted 5/5 theses with the whole zone below the close, and the journal
+    only showed the executor's daily `above_zone` skips. None when the close
+    is unknown."""
+    if not last_close or last_close <= 0 or not entry_zone:
+        return None
+    lo, hi = entry_zone
+    if lo <= last_close <= hi:
+        return 0.0
+    edge = hi if last_close > hi else lo
+    return round((edge - last_close) / last_close, 4)
+
+
 def in_entry_zone(price: float, zone: list) -> bool:
     return zone[0] <= price <= zone[1]
 

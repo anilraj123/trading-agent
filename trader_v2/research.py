@@ -133,9 +133,16 @@ EXECUTOR RULES (fixed — write theses that work WITH them):
 PORTFOLIO RULES:
 - At most {V2Config.MAX_THESES} live theses total (including entered positions), at most
   {V2Config.MAX_POSITIONS} entered at once. Fewer, higher-conviction theses beat more. Conviction 5 is rare.
-- entry_zone may sit below the last close (pullback entry) or above it (breakout
-  confirmation), but within ±15% of the close. invalidation_price must sit below the
-  zone — at a level that FALSIFIES the thesis, not an arbitrary percentage.
+- ZONES MUST BE REACHABLE. The executor never chases, so a zone the price never
+  re-enters simply never fills and the thesis dies unfilled. Default to a zone that
+  BRACKETS the last close: low end at support (that's where a GOOD fill happens),
+  high end at or slightly above the close. Put the whole zone below the close ONLY
+  when a pullback to that exact level is itself the thesis; whole zone above it only
+  as a breakout trigger. Always within ±15% of the close.
+- "Fill near the low end of the zone" means where WITHIN the zone a fill is good —
+  it is NOT an instruction to place the zone below the market.
+- invalidation_price must sit below the zone — at a level that FALSIFIES the
+  thesis, not an arbitrary percentage.
 - Every thesis needs a concrete catalyst or reason the move happens within the TTL.
 - Tonight's new_theses list REPLACES all unfilled theses. Re-issue (possibly with a
   fresh zone) anything you still believe in; anything you omit is cancelled.
@@ -412,7 +419,12 @@ def run_nightly(alpaca, llm, discovery, notif):
             th.apply_terminal(t, "cancelled")
             store.journal(th.event("thesis_cancelled", thesis=t, reason=reason))
     for t in selected:
-        store.journal(th.event("thesis_created", thesis=t))
+        # zone_gap_pct: reachability of tonight's zone vs the close the analyst
+        # saw — a persistently negative gap means pullback-only zones the
+        # no-chase executor may never fill.
+        store.journal(th.event("thesis_created", thesis=t,
+                               zone_gap_pct=th.zone_gap_pct(
+                                   t["entry_zone"], closes.get(t["symbol"]))))
 
     new_book = [t for t in theses if t["status"] == "entered"] + selected
     store.save_theses(new_book)
