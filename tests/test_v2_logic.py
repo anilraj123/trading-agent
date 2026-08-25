@@ -717,3 +717,27 @@ class TestResearchKeptCount:
         t = self._entered(False)
         del t["pending_close"]
         assert kept_count([t]) == 1
+
+
+class TestZoneGapPct:
+    """Journalled on every thesis_created: signed % distance from the analyst's
+    close to the nearest zone edge. First live week: 5/5 theses were minted
+    with the whole zone below the close — unfillable for a no-chase executor."""
+
+    def test_close_inside_zone(self):
+        assert th.zone_gap_pct([95.0, 105.0], 100.0) == 0.0
+
+    def test_zone_below_close_negative(self):
+        # SMR 8/25: zone 9.15-9.45, close 9.81 -> nearest edge 9.45, -3.67%
+        assert th.zone_gap_pct([9.15, 9.45], 9.81) == -0.0367
+
+    def test_zone_above_close_positive(self):
+        assert th.zone_gap_pct([102.0, 104.0], 100.0) == 0.02
+
+    def test_close_at_edge_is_inside(self):
+        assert th.zone_gap_pct([95.0, 105.0], 105.0) == 0.0
+        assert th.zone_gap_pct([95.0, 105.0], 95.0) == 0.0
+
+    def test_unknown_close_returns_none(self):
+        assert th.zone_gap_pct([95.0, 105.0], None) is None
+        assert th.zone_gap_pct([95.0, 105.0], 0) is None
