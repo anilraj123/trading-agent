@@ -119,6 +119,11 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
         account = alpaca.get_account()
         equity, last_equity = float(account.equity), float(account.last_equity)
         cash = float(account.cash)
+        # Alpaca rejects an order against buying_power, which on this cash
+        # account has run BELOW `cash` (8/28: cash-based sizing asked $249.07
+        # with buying_power $247.96 -> two "insufficient buying power" errors
+        # and a 15-min retry). Size against the number the order gate uses.
+        buying_power = float(getattr(account, "buying_power", None) or cash)
     except Exception as e:
         logger.error(f"broker state fetch failed: {e} — skipping cycle")
         store.journal(th.event("error", where="broker_state", message=str(e)))
@@ -245,7 +250,7 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
         entered_count = len([t for t in theses if t["status"] == "entered"])
         held_syms = {t["symbol"] for t in theses if t["status"] == "entered"} | \
                     {opt.parse_osi(s)["underlying"] if opt.parse_osi(s) else s for s in positions}
-        avail_cash = cash
+        avail_cash = th.spendable_cash(cash, buying_power)
         for t in sorted(actives, key=lambda x: -x["conviction"]):
             if t["status"] != "active":
                 continue
@@ -372,6 +377,7 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
     # --- 7. heartbeat + persist ---------------------------------------------
     store.journal(th.event(
         "heartbeat", cycle=cycle_count, equity=equity, cash=round(cash, 2),
+        buying_power=round(buying_power, 2),
         entered=sorted({t["symbol"] for t in theses if t["status"] == "entered"}),
         waiting=len([t for t in theses if t["status"] == "active"]),
         close_window=close_window, halted=halted, kill_switch=kill_switch))

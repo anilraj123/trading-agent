@@ -129,6 +129,12 @@ EXECUTOR RULES (fixed — write theses that work WITH them):
   and your price_target is advisory. Let the trail do the exit; pick targets to express
   conviction, not to cap winners.
 - Unfilled theses expire after ttl_days calendar days.
+- HARD GATES ARE ENFORCED IN CODE. A new thesis is REJECTED outright when its candidate
+  row shows volume_ratio < {V2Config.GATE_MIN_VOLUME_RATIO:g}, |chg_5d_pct| > {V2Config.GATE_MAX_MOVE_5D_PCT:g}, or rsi_14 > {V2Config.GATE_MAX_RSI:g}
+  (bullish; mirrored for bearish). Sizing down to a lower conviction does NOT get a
+  gate-failing name through — do not propose it. Never emit a thesis you intend to
+  exclude: omitting it is the only way to exclude it (the executor does not read
+  your reasoning).
 
 PORTFOLIO RULES:
 - At most {V2Config.MAX_THESES} live theses total (including entered positions), at most
@@ -394,11 +400,13 @@ def run_nightly(alpaca, llm, discovery, notif):
         # keep -> no-op
 
     # --- new theses: validate, select, replace unfilled book ---------------
-    candidate_syms = {c["symbol"] for c in candidates}
+    cand_by_sym = {c["symbol"]: c for c in candidates}
+    candidate_syms = set(cand_by_sym)
     entered_syms = {t["symbol"] for t in entered}
     validated, errors = [], []
     for raw in result.get("new_theses", []):
-        err = th.validate_new_thesis(raw, closes.get(str(raw.get("symbol", "")).upper()),
+        sym = str(raw.get("symbol", "")).upper()
+        err = th.validate_new_thesis(raw, closes.get(sym),
                                      candidate_syms, entered_syms,
                                      blacklist=set(Config.BLACKLIST),
                                      crypto_suffixes=tuple(Config.CRYPTO_SUFFIXES),
@@ -406,8 +414,17 @@ def run_nightly(alpaca, llm, discovery, notif):
                                      opt_min_conviction=V2Config.OPT_MIN_CONVICTION)
         if err:
             errors.append(err)
-        else:
-            validated.append(th.build_thesis(raw, today))
+            continue
+        # Hard gates are code, not prompt: the analyst repeatedly sized a
+        # gate-failing name down to conviction 3 instead of skipping it.
+        gate = th.hard_gate_reason(raw.get("direction", "bullish"), cand_by_sym.get(sym),
+                                   min_volume_ratio=V2Config.GATE_MIN_VOLUME_RATIO,
+                                   max_move_5d_pct=V2Config.GATE_MAX_MOVE_5D_PCT,
+                                   max_rsi=V2Config.GATE_MAX_RSI)
+        if gate:
+            errors.append(f"{sym}: hard gate — {gate}")
+            continue
+        validated.append(th.build_thesis(raw, today, screen=th.screen_snapshot(cand_by_sym.get(sym))))
     capacity = max(0, V2Config.MAX_THESES - len(entered))
     selected = th.select_theses(validated, capacity)
 

@@ -186,6 +186,27 @@ Option exit precedence: `expiry_force_exit` > `premium_stop` > `research_close` 
 
 ---
 
+## trader_v2 Entry Hard Gates (`trader_v2/config.py` + `thesis.hard_gate_reason`)
+
+Deterministic disqualifiers applied by nightly research to every NEW thesis
+against its candidate screen row (daily-bar TA). A failing thesis is rejected
+outright and journalled in `research_run.validation_errors` as `hard gate — …`.
+These encode the lessons file's three hard rules so the analyst can no longer
+"honour" them by sizing down to conviction 3. Set a gate to `0` to disable it;
+a metric missing from the candidate row never blocks.
+
+| Parameter | Env Var | Default | Meaning |
+|---|---|---|---|
+| Min volume ratio | `V2_GATE_MIN_VOLUME_RATIO` | 1.4 | today's volume / 20-day avg must be ≥ this (both directions) |
+| Max 5-day move | `V2_GATE_MAX_MOVE_5D_PCT` | 7.0 | \|5-day % change\| above this = extended/exhausted (both directions) |
+| Max entry RSI | `V2_GATE_MAX_RSI` | 67 | RSI(14) cap for bullish; mirrored to a floor of 100 − cap for bearish |
+
+The screen metrics the gates judged are stored on the thesis as `screen`
+(`{volume_ratio, chg_5d_pct, rsi_14}`) so every entry/exit journal snapshot
+carries the numbers the analyst saw.
+
+---
+
 ## Milestone Review (`PARAMETER_REVIEW_CHECKLIST.md`)
 
 | Milestone | Parameter | Current | Planned |
@@ -202,6 +223,7 @@ Option exit precedence: `expiry_force_exit` > `premium_stop` > `research_close` 
 
 | Date | Change |
 |---|---|
+| Sep 1 | **Hard entry gates moved from prompt to code + sizing against buying_power.** First live week post-#59: 7 fills, 5 exits, realized −$24.71, equity −5.4% vs baseline. Three of the seven entries (LEU 1.19x volume, BHVN +16% 5-day, SNPS 0.88x volume/+7.5%) were self-declared violations of the lessons file's hard disqualifiers that the analyst "honoured" by sizing down to conviction 3 — the post-mortem wrote three lessons saying stop, to no effect, and 9/1's research even emitted a NOW thesis whose reasoning said "excluding this" (it landed in the book as active). New `V2_GATE_MIN_VOLUME_RATIO` (1.4) / `V2_GATE_MAX_MOVE_5D_PCT` (7) / `V2_GATE_MAX_RSI` (67): `thesis.hard_gate_reason` rejects a new thesis against its candidate row after schema validation; the prompt now states the gates are enforced in code and that omission is the only way to exclude a name. The judged metrics travel on the thesis as `screen`. Separately, 8/28 produced two `insufficient buying power` errors (cash-based sizing asked $249.07; Alpaca's `buying_power` was $247.96 — below `cash` on this cash account): new `thesis.spendable_cash` sizes on min(cash, buying_power), heartbeat journals `buying_power`. **Trailing stop deliberately NOT changed** despite the weekly review's "URGENT" lesson: all three flat trailing exits (SNAP/SMR/LEU) preceded further declines (LEU −10% since) — the trail was protective; the losses were NBTX/BHVN research closes. 17 tests added. |
 | Aug 25 | **Unfillable-zone deadlock fixed** (found by the PM analyst routine after 3 straight zero-trade live sessions). Every thesis since cutover (FRHC/MRVL/SNAP 8/24, SMR/LEU 8/25) was minted with its ENTIRE entry zone below the close the analyst saw (gaps −0.6% to −3.7%) — a misreading of the "fill near the LOW end of the zone" lesson as "place the zone below market". With a no-chase executor those zones only fill on a pullback; MRVL hit its $245 target with the bot never in. Two changes: (1) research prompt now says ZONES MUST BE REACHABLE — default to bracketing the last close, whole-zone-below only when the pullback IS the thesis, and "low-end fill" explicitly ≠ "zone below market"; (2) `thesis.zone_gap_pct` is journalled on every `thesis_created` (0.0 = close inside zone, signed % to nearest edge otherwise) so reachability is trackable. No executor/risk changes. 5 tests added (254 pass). |
 | Aug 24 | **`research_run.n_kept` always reported `len(entered)`** (found by the AM analyst routine's first scheduled run; no tunables changed). The journalled kept-count was `len(entered) - len(decided) + len(decided)`, which cancels to `len(entered)` — even a close-everything night reported all positions as kept, corrupting the attribution data the weekly reviewer reads. New `kept_count(entered)` counts positions research did not flag `pending_close`. The unused `decided` set is gone. 5 tests added (249 pass). |
 | Aug 21 | **Two wrong facts fed to the LLM prompts — found by the PM analyst routine's first run** (no tunables changed). (1) The nightly research prompt hardcoded `capital: V2_CAPITAL` ($1,350) while the dynamic-mode executor sized on live equity ($1,032) — new `V2Config.capital_base(equity)` is now the single anchor used by both. (2) `run_weekly` gave Opus a 28-day journal window with no hint of how much the journal covers; on cutover night it read the hours-old `v2live` journal as "a month with zero trades", minted that as a false lesson, and dropped the true winning-profile lesson (evidence predated the file). New `coverage_note` + `store.journal_start_ts()` prepend a JOURNAL COVERAGE line and the weekly system prompt is told: uncovered ≠ inactive, keep lessons whose evidence predates the journal. `data/v2live/lessons.md` was hand-restored from the pristine paper copy. |

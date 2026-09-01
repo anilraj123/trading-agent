@@ -36,8 +36,45 @@ def _now_iso():
 # Construction & validation
 # --------------------------------------------------------------------------
 
-def build_thesis(raw: dict, today: date) -> dict:
-    """Canonical thesis dict from a validated raw LLM item."""
+SCREEN_FIELDS = ("volume_ratio", "chg_5d_pct", "rsi_14")
+
+
+def screen_snapshot(candidate: dict) -> dict:
+    """The screen metrics the hard gates judge, lifted off a candidate row so
+    they travel with the thesis into every journal snapshot (entry/exit
+    attribution needs the numbers the analyst saw, not tonight's)."""
+    return {k: (candidate or {}).get(k) for k in SCREEN_FIELDS}
+
+
+def hard_gate_reason(direction: str, candidate: dict, *, min_volume_ratio: float,
+                     max_move_5d_pct: float, max_rsi: float):
+    """Deterministic entry disqualifiers from the lessons file, applied to a
+    NEW thesis against its candidate screen row. Returns a reason string or
+    None. A gate set to 0 is off; a metric missing from the row never blocks
+    (no data is not a violation). Direction-aware: the 5-day move is judged on
+    magnitude (an extended drop is as exhausted as an extended run), and the
+    RSI cap mirrors to a floor for bearish theses."""
+    c = candidate or {}
+    vol = c.get("volume_ratio")
+    if min_volume_ratio > 0 and vol is not None and vol < min_volume_ratio:
+        return f"volume_ratio {vol:.2f} < {min_volume_ratio:g}"
+    mv = c.get("chg_5d_pct")
+    if max_move_5d_pct > 0 and mv is not None and abs(mv) > max_move_5d_pct:
+        return f"5d move {mv:+.2f}% beyond ±{max_move_5d_pct:g}%"
+    rsi = c.get("rsi_14")
+    if max_rsi > 0 and rsi is not None:
+        if direction == "bearish":
+            floor = 100 - max_rsi
+            if rsi < floor:
+                return f"rsi {rsi:.1f} < {floor:g} (bearish floor)"
+        elif rsi > max_rsi:
+            return f"rsi {rsi:.1f} > {max_rsi:g}"
+    return None
+
+
+def build_thesis(raw: dict, today: date, screen: dict = None) -> dict:
+    """Canonical thesis dict from a validated raw LLM item. `screen` is the
+    candidate's gate metrics at creation (see screen_snapshot)."""
     return {
         "id": f"T{today.strftime('%Y%m%d')}-{raw['symbol'].upper()}",
         "symbol": raw["symbol"].upper(),
@@ -55,6 +92,7 @@ def build_thesis(raw: dict, today: date) -> dict:
                                  else (raw.get("instrument") or "shares")),
         "ttl_days": int(raw["ttl_days"]),
         "reasoning": str(raw["reasoning"]),
+        "screen": dict(screen) if screen else None,
         "status": "active",
         "created": _now_iso(),
         "expires": (today + timedelta(days=int(raw["ttl_days"]))).isoformat(),
@@ -192,6 +230,20 @@ def entry_skip_reason(price: float, zone: list):
     if price < zone[0]:
         return "below_zone"
     return None
+
+
+def spendable_cash(cash: float, buying_power) -> float:
+    """What a new order may actually spend: the smaller of the account's cash
+    and its buying_power (the figure Alpaca's order gate checks). A missing or
+    non-positive buying_power falls back to cash."""
+    cash = float(cash or 0)
+    try:
+        bp = float(buying_power)
+    except (TypeError, ValueError):
+        return max(0.0, cash)
+    if bp <= 0:
+        return max(0.0, cash)
+    return max(0.0, min(cash, bp))
 
 
 def position_size(capital: float, max_positions: int, cap_pct: float,

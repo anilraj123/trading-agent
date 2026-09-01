@@ -26,6 +26,17 @@ class V2Config:
     TRAIL_STOP_PCT = float(os.getenv("V2_TRAIL_STOP_PCT", "-0.03"))
     CLOSE_WINDOW_MIN = int(os.getenv("V2_CLOSE_WINDOW_MIN", "25"))          # > cycle + runtime
 
+    # --- entry hard gates (deterministic, applied to every NEW thesis) ------
+    # The lessons file has said for weeks that these are hard disqualifiers,
+    # and the analyst kept "honouring" them by sizing down to conviction 3
+    # instead of skipping (LEU 1.19x, BHVN +16% 5d, SNPS 0.88x). A prompt
+    # cannot enforce a gate; code can. Research rejects a thesis whose screen
+    # metrics fail any gate (journalled in research_run.validation_errors).
+    # 0 disables a gate; a missing metric never blocks.
+    GATE_MIN_VOLUME_RATIO = float(os.getenv("V2_GATE_MIN_VOLUME_RATIO", "1.4"))
+    GATE_MAX_MOVE_5D_PCT = float(os.getenv("V2_GATE_MAX_MOVE_5D_PCT", "7.0"))
+    GATE_MAX_RSI = float(os.getenv("V2_GATE_MAX_RSI", "67"))
+
     # --- risk rails ---------------------------------------------------------
     DAILY_LOSS_HALT_PCT = float(os.getenv("V2_DAILY_LOSS_HALT_PCT", "-0.05"))
     TRADING_ENABLED = os.getenv("V2_TRADING_ENABLED", "true").lower() == "true"
@@ -107,5 +118,7 @@ class V2Config:
         assert 0 < V2Config.OPT_MAX_PREMIUM_PCT <= V2Config.OPT_SLEEVE_CAP_PCT <= 1
         assert V2Config.OPT_TAKE_PROFIT_PCT > 0
         assert V2Config.CAPITAL_MODE in ("static", "dynamic")
+        assert V2Config.GATE_MIN_VOLUME_RATIO >= 0 and V2Config.GATE_MAX_MOVE_5D_PCT >= 0
+        assert 0 <= V2Config.GATE_MAX_RSI <= 100
         from trader_v2.options import parse_stop_tiers
         parse_stop_tiers(V2Config.OPT_STOP_TIERS_SPEC)  # raises on a bad spec
