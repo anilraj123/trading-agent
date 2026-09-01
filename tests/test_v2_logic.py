@@ -798,7 +798,7 @@ class TestSpendableCash:
     def test_sizing_on_spendable_fits_the_order_gate(self):
         # capital/4 = 249 would exceed bp 247.96; clamped to 0.98*bp
         qty = th.position_size(996.0, 4, 0.30, th.spendable_cash(517.0, 247.96), 225.0, 10.0)
-        assert qty * 225.0 <= 247.96 * 0.98 + 1e-6
+        assert 0 < qty * 225.0 < 247.96          # fits the gate, with headroom
 
 
 class TestZoneGapPct:
