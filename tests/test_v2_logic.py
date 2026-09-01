@@ -719,6 +719,88 @@ class TestResearchKeptCount:
         assert kept_count([t]) == 1
 
 
+class TestHardGates:
+    GATES = dict(min_volume_ratio=1.4, max_move_5d_pct=7.0, max_rsi=67)
+
+    def _g(self, cand, direction="bullish", **over):
+        kw = dict(self.GATES); kw.update(over)
+        return th.hard_gate_reason(direction, cand, **kw)
+
+    def test_clean_profile_passes(self):
+        assert self._g({"volume_ratio": 1.5, "chg_5d_pct": 3.0, "rsi_14": 62.0}) is None
+
+    def test_sub_gate_volume_rejected(self):
+        # SNPS 9/1: entered at conviction 3 with 0.88x "as a watch-level entry"
+        r = self._g({"volume_ratio": 0.88, "chg_5d_pct": 3.0, "rsi_14": 60.0})
+        assert r and "volume_ratio 0.88" in r
+
+    def test_extended_move_rejected_either_sign(self):
+        # BHVN 8/27: +16.39% 5-day, entered anyway -> -3.23%
+        assert "5d move +16.39%" in self._g({"volume_ratio": 2.0, "chg_5d_pct": 16.39, "rsi_14": 60.0})
+        assert "5d move -9.00%" in self._g({"volume_ratio": 2.0, "chg_5d_pct": -9.0, "rsi_14": 40.0})
+
+    def test_rsi_cap_bullish(self):
+        assert "rsi 69.3" in self._g({"volume_ratio": 2.0, "chg_5d_pct": 2.0, "rsi_14": 69.34})
+        assert self._g({"volume_ratio": 2.0, "chg_5d_pct": 2.0, "rsi_14": 67.0}) is None
+
+    def test_rsi_mirrors_to_floor_for_bearish(self):
+        assert "bearish floor" in self._g({"volume_ratio": 2.0, "chg_5d_pct": -2.0, "rsi_14": 30.0}, "bearish")
+        assert self._g({"volume_ratio": 2.0, "chg_5d_pct": -2.0, "rsi_14": 69.0}, "bearish") is None
+
+    def test_volume_checked_before_move(self):
+        # NOW 9/1 failed both; the first failing gate is what gets journalled
+        r = self._g({"volume_ratio": 0.91, "chg_5d_pct": 13.59, "rsi_14": 66.29})
+        assert r.startswith("volume_ratio")
+
+    def test_missing_metric_never_blocks(self):
+        assert self._g({"volume_ratio": None, "chg_5d_pct": None, "rsi_14": None}) is None
+        assert self._g({}) is None
+        assert self._g(None) is None
+
+    def test_zero_disables_a_gate(self):
+        cand = {"volume_ratio": 0.5, "chg_5d_pct": 20.0, "rsi_14": 80.0}
+        assert "5d move" in self._g(cand, min_volume_ratio=0)
+        assert "rsi" in self._g(cand, min_volume_ratio=0, max_move_5d_pct=0)
+        assert self._g(cand, min_volume_ratio=0, max_move_5d_pct=0, max_rsi=0) is None
+
+    def test_screen_snapshot_travels_with_thesis(self):
+        cand = {"symbol": "NVDA", "close": 175.0, "volume_ratio": 2.34,
+                "chg_5d_pct": 6.18, "rsi_14": 53.5, "buy_score": 0.8}
+        t = th.build_thesis(raw_thesis(), TODAY, screen=th.screen_snapshot(cand))
+        assert t["screen"] == {"volume_ratio": 2.34, "chg_5d_pct": 6.18, "rsi_14": 53.5}
+        assert th.build_thesis(raw_thesis(), TODAY)["screen"] is None
+        assert th.screen_snapshot(None) == {"volume_ratio": None, "chg_5d_pct": None, "rsi_14": None}
+
+    def test_config_defaults_match_lessons(self):
+        assert V2Config.GATE_MIN_VOLUME_RATIO == 1.4
+        assert V2Config.GATE_MAX_MOVE_5D_PCT == 7.0
+        assert V2Config.GATE_MAX_RSI == 67
+
+
+class TestSpendableCash:
+    def test_buying_power_binds_below_cash(self):
+        # 8/28: cash-based sizing asked $249.07 against buying_power $247.96
+        assert th.spendable_cash(517.0, 247.96) == 247.96
+
+    def test_cash_binds_below_buying_power(self):
+        assert th.spendable_cash(200.0, 400.0) == 200.0
+
+    def test_missing_or_bad_buying_power_falls_back_to_cash(self):
+        assert th.spendable_cash(300.0, None) == 300.0
+        assert th.spendable_cash(300.0, "n/a") == 300.0
+        assert th.spendable_cash(300.0, 0) == 300.0
+        assert th.spendable_cash(300.0, -5) == 300.0
+
+    def test_never_negative(self):
+        assert th.spendable_cash(-10.0, 50.0) == 0.0
+        assert th.spendable_cash(None, None) == 0.0
+
+    def test_sizing_on_spendable_fits_the_order_gate(self):
+        # capital/4 = 249 would exceed bp 247.96; clamped to 0.98*bp
+        qty = th.position_size(996.0, 4, 0.30, th.spendable_cash(517.0, 247.96), 225.0, 10.0)
+        assert 0 < qty * 225.0 < 247.96          # fits the gate, with headroom
+
+
 class TestZoneGapPct:
     """Journalled on every thesis_created: signed % distance from the analyst's
     close to the nearest zone edge. First live week: 5/5 theses were minted
