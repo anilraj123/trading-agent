@@ -186,6 +186,30 @@ Option exit precedence: `expiry_force_exit` > `premium_stop` > `research_close` 
 
 ---
 
+## trader_v2 Universe Screen & Sector Cap (`trader_v2/universe.py`, `trader_v2/screen.py`)
+
+Nightly research no longer hands the analyst the top-12 of a trending scrape.
+It screens a broad fixed universe (S&P 500 + S&P 400 constituents with GICS
+sectors, from Wikipedia, cached under `DATA_DIR/universe_cache.json`) plus the
+trending names for the lessons-file winning profile, and the analyst only
+sees names that pass (plus the book). Each night journals a `screen_run`
+event (universe source, counts, picks).
+
+| Parameter | Env Var | Default | Meaning |
+|---|---|---|---|
+| Universe sources | `V2_UNIVERSE_SOURCES` | `sp500,sp400` | Wikipedia constituent pages to merge |
+| Universe refresh | `V2_UNIVERSE_REFRESH_DAYS` | 7 | cache age before re-fetch; a failed fetch falls back to the stale cache, then to a hardcoded ~90-name list |
+| Screen bar window | `V2_SCREEN_BAR_DAYS` | 120 | calendar days of daily bars per symbol (SMA50 needs ~72); fetched in 200-symbol chunks |
+| Bullish RSI floor | `V2_SCREEN_MIN_RSI` | 50 | profile RSI band is [floor, `V2_GATE_MAX_RSI`]; bearish mirrors to [100−cap, 100−floor] |
+| Trend requirement | `V2_SCREEN_REQUIRE_TREND` | true | bullish must close above BOTH SMA20/SMA50 (bearish below both) |
+| Bearish picks | `V2_SCREEN_BEARISH_MAX` | 3 | max bearish candidates shown; forced to 0 while `V2_OPT_ENABLED=false` |
+| Include trending | `V2_SCREEN_INCLUDE_TRENDING` | true | fold the Yahoo/Finviz/MarketWatch scrape into the universe (screened identically) |
+| Sector cap | `V2_MAX_PER_SECTOR` | 1 | max theses+positions per GICS sector (`thesis.select_with_sector_cap`; unknown sector never capped; 0 disables) |
+
+Bullish candidates are ranked by volume ratio (confirmation), truncated to
+`V2_RESEARCH_CANDIDATES`. The prompt tells the analyst candidates are
+pre-qualified: pick, don't re-screen.
+
 ## trader_v2 Risk Cap & Lessons Hygiene (`trader_v2/config.py`)
 
 | Parameter | Env Var | Default | Meaning |
@@ -232,6 +256,7 @@ carries the numbers the analyst saw.
 
 | Date | Change |
 |---|---|
+| Sep 2 | **Universe screen + sector cap** (approved items 1 and 4). The analyst's candidates were the top-12 by v1 buy score of a scraped trending list — names already in the news have already moved, which is why most of the screen failed the extended-move gate and the book chased (NBTX, BHVN, LEU). New `trader_v2/universe.py` (S&P 500 + 400 constituents with GICS sectors from Wikipedia, weekly-refreshed cache, hardcoded fallback) and `trader_v2/screen.py` (pure profile test: hard gates + RSI ≥ `V2_SCREEN_MIN_RSI` 50 + above both SMAs; bearish mirror; ranked by volume ratio). `_assemble_candidates` screens universe ∪ trending ∪ book over `V2_SCREEN_BAR_DAYS` (120) of daily bars in 200-symbol chunks and journals `screen_run`. Prompt: candidates are pre-qualified — pick, don't re-screen. Sector cap `V2_MAX_PER_SECTOR` (1): `thesis.select_with_sector_cap` drops a second thesis in a sector already held/picked (lower conviction loses; journalled in `validation_errors`); theses now carry `sector`. 26 tests added (new `tests/test_v2_screen.py`). |
 | Sep 2 | **Risk cap, lessons hygiene, options off** (user-approved improvement items 2, 3, 5). (2) The exits truncate winners at +1–4% (trail floor = entry, 5-day TTL) while invalidation sat 6–12% below the worst fill (NBTX −7.1%), i.e. negative expectancy by construction. New `V2_MAX_RISK_PCT` (0.05): validation rejects a thesis whose zone high (bearish: zone low) is more than 5% from invalidation; `apply_revision` refuses a loosening past the cap and records it under `revisions[].rejected` (journalled on `thesis_revised.rejected`). Prompt explains the cap and says "move the zone down or skip". (3) The post-mortem minted 5 lessons from 5 trades in one week and the weekly review then wrote an "URGENT" trail lesson the bars contradict — it only ever saw exit P&L. Lessons now carry `(n=k)` distinct-trade counts (`V2_LESSON_MIN_TRADES` 3 = threshold for rule wording); post-mortem and weekly receive an EXITS FOLLOW-UP (`research.exit_followup`: price now vs exit, `V2_POSTMORTEM_FOLLOWUP_DAYS` 10 / weekly 28) and are told an exit followed by a further decline was right; `screen_at_creation` metrics are shown per closed trade; `run_weekly` now takes `alpaca`. (5) `V2_OPT_ENABLED: "false"` in compose; bearish theses rejected at validation while off; prompt says so. 20 tests added. |
 | Sep 1 | **Hard entry gates moved from prompt to code + sizing against buying_power.** First live week post-#59: 7 fills, 5 exits, realized −$24.71, equity −5.4% vs baseline. Three of the seven entries (LEU 1.19x volume, BHVN +16% 5-day, SNPS 0.88x volume/+7.5%) were self-declared violations of the lessons file's hard disqualifiers that the analyst "honoured" by sizing down to conviction 3 — the post-mortem wrote three lessons saying stop, to no effect, and 9/1's research even emitted a NOW thesis whose reasoning said "excluding this" (it landed in the book as active). New `V2_GATE_MIN_VOLUME_RATIO` (1.4) / `V2_GATE_MAX_MOVE_5D_PCT` (7) / `V2_GATE_MAX_RSI` (67): `thesis.hard_gate_reason` rejects a new thesis against its candidate row after schema validation; the prompt now states the gates are enforced in code and that omission is the only way to exclude a name. The judged metrics travel on the thesis as `screen`. Separately, 8/28 produced two `insufficient buying power` errors (cash-based sizing asked $249.07; Alpaca's `buying_power` was $247.96 — below `cash` on this cash account): new `thesis.spendable_cash` sizes on min(cash, buying_power), heartbeat journals `buying_power`. **Trailing stop deliberately NOT changed** despite the weekly review's "URGENT" lesson: all three flat trailing exits (SNAP/SMR/LEU) preceded further declines (LEU −10% since) — the trail was protective; the losses were NBTX/BHVN research closes. 17 tests added. |
 | Aug 25 | **Unfillable-zone deadlock fixed** (found by the PM analyst routine after 3 straight zero-trade live sessions). Every thesis since cutover (FRHC/MRVL/SNAP 8/24, SMR/LEU 8/25) was minted with its ENTIRE entry zone below the close the analyst saw (gaps −0.6% to −3.7%) — a misreading of the "fill near the LOW end of the zone" lesson as "place the zone below market". With a no-chase executor those zones only fill on a pullback; MRVL hit its $245 target with the bot never in. Two changes: (1) research prompt now says ZONES MUST BE REACHABLE — default to bracketing the last close, whole-zone-below only when the pullback IS the thesis, and "low-end fill" explicitly ≠ "zone below market"; (2) `thesis.zone_gap_pct` is journalled on every `thesis_created` (0.0 = close inside zone, signed % to nearest edge otherwise) so reachability is trackable. No executor/risk changes. 5 tests added (254 pass). |

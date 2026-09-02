@@ -72,9 +72,10 @@ def hard_gate_reason(direction: str, candidate: dict, *, min_volume_ratio: float
     return None
 
 
-def build_thesis(raw: dict, today: date, screen: dict = None) -> dict:
+def build_thesis(raw: dict, today: date, screen: dict = None, sector: str = None) -> dict:
     """Canonical thesis dict from a validated raw LLM item. `screen` is the
-    candidate's gate metrics at creation (see screen_snapshot)."""
+    candidate's gate metrics at creation (see screen_snapshot); `sector` its
+    GICS sector from the universe (None when unknown)."""
     return {
         "id": f"T{today.strftime('%Y%m%d')}-{raw['symbol'].upper()}",
         "symbol": raw["symbol"].upper(),
@@ -93,6 +94,7 @@ def build_thesis(raw: dict, today: date, screen: dict = None) -> dict:
         "ttl_days": int(raw["ttl_days"]),
         "reasoning": str(raw["reasoning"]),
         "screen": dict(screen) if screen else None,
+        "sector": sector or None,
         "status": "active",
         "created": _now_iso(),
         "expires": (today + timedelta(days=int(raw["ttl_days"]))).isoformat(),
@@ -207,6 +209,32 @@ def select_theses(validated: list, capacity: int) -> list:
             by_sym[t["symbol"]] = t
     ranked = sorted(by_sym.values(), key=lambda t: -t["conviction"])
     return ranked[:max(0, capacity)]
+
+
+def select_with_sector_cap(validated: list, capacity: int, max_per_sector: int,
+                           taken_sectors=()) -> tuple:
+    """select_theses' dedupe + conviction ranking, then at most
+    `max_per_sector` theses per GICS sector, counting sectors already held
+    (`taken_sectors`, from entered theses). A thesis with unknown sector
+    (None) is never capped. Returns (selected, dropped) where dropped is a
+    list of (thesis, reason) for the caller to journal; capacity truncation
+    is silent, as in select_theses."""
+    if not max_per_sector or max_per_sector <= 0:
+        return select_theses(validated, capacity), []
+    from collections import Counter
+    counts = Counter(s for s in taken_sectors if s)
+    selected, dropped = [], []
+    for t in select_theses(validated, len(validated)):
+        sec = t.get("sector")
+        if sec and counts[sec] >= max_per_sector:
+            dropped.append((t, f"sector cap: {sec} already has {counts[sec]} (max {max_per_sector})"))
+            continue
+        if len(selected) >= max(0, capacity):
+            break
+        selected.append(t)
+        if sec:
+            counts[sec] += 1
+    return selected, dropped
 
 
 # --------------------------------------------------------------------------

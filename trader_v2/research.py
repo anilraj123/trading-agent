@@ -18,8 +18,10 @@ from trader.technical_analysis import TechnicalAnalysis
 from trader.tracker import log_llm_call
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
+from . import screen
 from . import store
 from . import thesis as th
+from . import universe
 from .config import V2Config
 
 logger = logging.getLogger("trader_v2.research")
@@ -144,9 +146,18 @@ EXECUTOR RULES (fixed — write theses that work WITH them):
   exclude: omitting it is the only way to exclude it (the executor does not read
   your reasoning).
 
+CANDIDATES ARE PRE-QUALIFIED. Every non-book candidate you receive already passes the
+hard gates AND the profile screen over the S&P 500/400 universe (profile "bullish": above
+both SMAs, RSI {V2Config.SCREEN_MIN_RSI:g}-{V2Config.GATE_MAX_RSI:g}, volume >= {V2Config.GATE_MIN_VOLUME_RATIO:g}x, |5-day move| <= {V2Config.GATE_MAX_MOVE_5D_PCT:g}%; "bearish" is the
+mirror). Your job is to pick the best few (zero is fine), and to write REACHABLE zones and
+invalidations within the risk cap — not to re-screen. Do not propose symbols that are not
+in the candidate list.
+
 PORTFOLIO RULES:
 - At most {V2Config.MAX_THESES} live theses total (including entered positions), at most
   {V2Config.MAX_POSITIONS} entered at once. Fewer, higher-conviction theses beat more. Conviction 5 is rare.
+- ONE POSITION PER SECTOR (enforced in code): candidates carry "sector"; a new thesis in a
+  sector already held or already picked tonight is rejected (highest conviction wins).
 - ZONES MUST BE REACHABLE. The executor never chases, so a zone the price never
   re-enters simply never fills and the thesis dies unfilled. Default to a zone that
   BRACKETS the last close: low end at support (that's where a GOOD fill happens),
@@ -309,18 +320,52 @@ def _fetch_news(alpaca, symbols):
     return out
 
 
+def _bars_for(alpaca, symbols: list, days: int, chunk: int = 200):
+    """Daily bars for many symbols, fetched in chunks (a 900-symbol query
+    string is too long for one request). One failed chunk is logged and
+    skipped, not fatal."""
+    frames = []
+    for i in range(0, len(symbols), chunk):
+        part = symbols[i:i + chunk]
+        try:
+            df = alpaca.get_bars_batch(part, days=days, timeframe=TimeFrame(1, TimeFrameUnit.Day))
+        except Exception as e:
+            logger.warning(f"bars chunk {i // chunk} ({part[0]}..{part[-1]}) failed: {e}")
+            df = None
+        if df is not None and len(df):
+            frames.append(df)
+    if not frames:
+        return None
+    if len(frames) == 1:
+        return frames[0]
+    import pandas as pd
+    return pd.concat(frames)
+
+
 def _assemble_candidates(alpaca, discovery, book_symbols):
-    """Top TA-ranked discovery names + everything already in the book.
-    Returns (candidates: list[dict], closes: dict[symbol -> last_close])."""
-    try:
-        universe = discovery.discover_trending_stocks()[:100]
-    except Exception as e:
-        logger.warning(f"discovery failed: {e}")
-        universe = []
-    symbols = list(dict.fromkeys(list(book_symbols) + universe))
-    bars = alpaca.get_bars_batch(symbols, days=250, timeframe=TimeFrame(1, TimeFrameUnit.Day))
-    scored, closes = [], {}
+    """Everything in the book + the names that pass the winning-profile
+    screen over the broad universe (S&P 500/400 + trending scrapes), ranked
+    by volume confirmation. Returns (candidates, closes: symbol -> close).
+
+    Before 2026-09-02 this was the top-12 of the trending scrape by v1 buy
+    score — a list of names that had already moved, which is why nearly
+    every candidate failed the extended-move gate."""
+    members, usource = universe.load_universe()
+    trending = []
+    if V2Config.SCREEN_INCLUDE_TRENDING:
+        try:
+            trending = discovery.discover_trending_stocks()[:100]
+        except Exception as e:
+            logger.warning(f"discovery failed: {e}")
+    blocked = set(Config.BLACKLIST)
+    symbols = [s for s in dict.fromkeys(list(book_symbols) + list(members) + trending)
+               if s and s not in blocked and not any(s.endswith(sfx) for sfx in Config.CRYPTO_SUFFIXES)]
+    bars = _bars_for(alpaca, symbols, V2Config.SCREEN_BAR_DAYS)
+    rows, closes = [], {}
     if bars is None:
+        store.journal(th.event("screen_run", universe_source=usource, n_universe=len(members),
+                               n_trending=len(trending), n_symbols=len(symbols), n_with_bars=0,
+                               error="no bars"))
         return [], {}
     for sym in symbols:
         try:
@@ -330,24 +375,37 @@ def _assemble_candidates(alpaca, discovery, book_symbols):
             ta = TechnicalAnalysis.compute_all(df)
             if not ta:
                 continue
-            sig = TechnicalAnalysis.score_signals(ta)
             close = float(df["close"].iloc[-1])
             closes[sym] = close
-            scored.append({
+            rows.append({
                 "symbol": sym, "close": close,
                 "chg_5d_pct": ta.get("momentum_5"),
                 "rsi_14": ta.get("rsi_14"),
                 "sma_20": ta.get("sma_20"), "sma_50": ta.get("sma_50"),
                 "volume_ratio": (ta.get("volume") or {}).get("ratio"),
-                "buy_score": sig.get("buy_score"),
+                "sector": members.get(sym),
                 "in_book": sym in book_symbols,
             })
         except Exception:
             continue
-    book = [c for c in scored if c["in_book"]]
-    rest = sorted([c for c in scored if not c["in_book"]],
-                  key=lambda c: -(c["buy_score"] or 0))[:V2Config.RESEARCH_CANDIDATES]
-    return book + rest, closes
+    gates = dict(min_volume_ratio=V2Config.GATE_MIN_VOLUME_RATIO,
+                 max_move_5d_pct=V2Config.GATE_MAX_MOVE_5D_PCT,
+                 max_rsi=V2Config.GATE_MAX_RSI, min_rsi=V2Config.SCREEN_MIN_RSI,
+                 require_trend=V2Config.SCREEN_REQUIRE_TREND)
+    for r in rows:
+        r["profile"] = "book" if r["in_book"] else screen.profile_of(r, **gates)
+    n_bull = sum(1 for r in rows if r["profile"] == "bullish")
+    n_bear = sum(1 for r in rows if r["profile"] == "bearish")
+    picked = screen.rank([r for r in rows if not r["in_book"]], V2Config.RESEARCH_CANDIDATES,
+                         V2Config.SCREEN_BEARISH_MAX if V2Config.OPT_ENABLED else 0)
+    book = [r for r in rows if r["in_book"]]
+    store.journal(th.event("screen_run", universe_source=usource, n_universe=len(members),
+                           n_trending=len(trending), n_symbols=len(symbols), n_with_bars=len(rows),
+                           n_bullish_pass=n_bull, n_bearish_pass=n_bear,
+                           picked=[f"{r['symbol']}:{r['profile'][:4]}" for r in picked]))
+    logger.info(f"screen: {len(rows)} rows, {n_bull} bullish / {n_bear} bearish pass, "
+                f"picked {[r['symbol'] for r in picked]}")
+    return book + picked, closes
 
 
 # ---------------------------------------------------------------------------
@@ -499,9 +557,16 @@ def run_nightly(alpaca, llm, discovery, notif):
         if gate:
             errors.append(f"{sym}: hard gate — {gate}")
             continue
-        validated.append(th.build_thesis(raw, today, screen=th.screen_snapshot(cand_by_sym.get(sym))))
+        validated.append(th.build_thesis(raw, today, screen=th.screen_snapshot(cand_by_sym.get(sym)),
+                                         sector=(cand_by_sym.get(sym) or {}).get("sector")))
     capacity = max(0, V2Config.MAX_THESES - len(entered))
-    selected = th.select_theses(validated, capacity)
+    # One position per GICS sector across entered + tonight's picks (8/28:
+    # two nuclear + two biotech names fell together).
+    selected, dropped = th.select_with_sector_cap(
+        validated, capacity, V2Config.MAX_PER_SECTOR,
+        taken_sectors=[t.get("sector") for t in entered])
+    for t, why in dropped:
+        errors.append(f"{t['symbol']}: {why}")
 
     # replace model: cancel unfilled actives not re-issued tonight
     selected_syms = {t["symbol"] for t in selected}
