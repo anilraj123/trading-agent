@@ -53,6 +53,21 @@ class V2Config:
     # exits within this many days, so exit lessons rest on the post-exit path.
     POSTMORTEM_FOLLOWUP_DAYS = int(os.getenv("V2_POSTMORTEM_FOLLOWUP_DAYS", "10"))
 
+    # --- nightly universe screen -------------------------------------------
+    # The analyst only sees names that pass the winning-profile screen over a
+    # broad fixed universe (S&P 500 + 400 via trader_v2/universe.py), plus the
+    # book. Trending scrapes are folded in but screened identically.
+    UNIVERSE_SOURCES = os.getenv("V2_UNIVERSE_SOURCES", "sp500,sp400")
+    UNIVERSE_REFRESH_DAYS = int(os.getenv("V2_UNIVERSE_REFRESH_DAYS", "7"))
+    SCREEN_BAR_DAYS = int(os.getenv("V2_SCREEN_BAR_DAYS", "120"))          # calendar days of daily bars
+    SCREEN_MIN_RSI = float(os.getenv("V2_SCREEN_MIN_RSI", "50"))           # bullish RSI floor (cap = GATE_MAX_RSI)
+    SCREEN_REQUIRE_TREND = os.getenv("V2_SCREEN_REQUIRE_TREND", "true").lower() == "true"  # above both SMAs
+    SCREEN_BEARISH_MAX = int(os.getenv("V2_SCREEN_BEARISH_MAX", "3"))     # 0 while options are off
+    SCREEN_INCLUDE_TRENDING = os.getenv("V2_SCREEN_INCLUDE_TRENDING", "true").lower() == "true"
+    # One position per GICS sector: SMR+LEU (nuclear) and NBTX+BHVN (biotech)
+    # fell together on 8/28. Unknown sector is never capped. 0 disables.
+    MAX_PER_SECTOR = int(os.getenv("V2_MAX_PER_SECTOR", "1"))
+
     # --- risk rails ---------------------------------------------------------
     DAILY_LOSS_HALT_PCT = float(os.getenv("V2_DAILY_LOSS_HALT_PCT", "-0.05"))
     TRADING_ENABLED = os.getenv("V2_TRADING_ENABLED", "true").lower() == "true"
@@ -138,5 +153,9 @@ class V2Config:
         assert 0 <= V2Config.GATE_MAX_RSI <= 100
         assert 0 < V2Config.MAX_RISK_PCT <= abs(V2Config.DISASTER_STOP_PCT)
         assert V2Config.LESSON_MIN_TRADES >= 1 and V2Config.POSTMORTEM_FOLLOWUP_DAYS >= 0
+        assert V2Config.SCREEN_BAR_DAYS >= 90                      # SMA50 needs ~72 calendar days
+        if V2Config.GATE_MAX_RSI > 0:
+            assert 0 <= V2Config.SCREEN_MIN_RSI < V2Config.GATE_MAX_RSI
+        assert V2Config.SCREEN_BEARISH_MAX >= 0 and V2Config.MAX_PER_SECTOR >= 0
         from trader_v2.options import parse_stop_tiers
         parse_stop_tiers(V2Config.OPT_STOP_TIERS_SPEC)  # raises on a bad spec
