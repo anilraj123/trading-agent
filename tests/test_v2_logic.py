@@ -31,7 +31,7 @@ CANDIDATES = {"NVDA", "AMD", "AVGO", "MRVL"}
 
 def raw_thesis(**over):
     base = dict(symbol="NVDA", conviction=4, entry_zone_low=172.0,
-                entry_zone_high=178.5, invalidation_price=165.0,
+                entry_zone_high=178.5, invalidation_price=170.0,
                 price_target=195.0, catalyst="earnings 7/22", ttl_days=5,
                 reasoning="test")
     base.update(over)
@@ -312,7 +312,7 @@ class TestLessonsBounding:
 def bearish_thesis(**over):
     base = dict(symbol="NVDA", direction="bearish", conviction=4,
                 entry_zone_low=172.0, entry_zone_high=178.5,
-                invalidation_price=185.0, price_target=155.0,
+                invalidation_price=180.0, price_target=155.0,
                 catalyst="earnings miss 8/14", catalyst_date="2026-07-20",
                 ttl_days=5, reasoning="test")
     base.update(over)
@@ -717,6 +717,101 @@ class TestResearchKeptCount:
         t = self._entered(False)
         del t["pending_close"]
         assert kept_count([t]) == 1
+
+
+class TestRiskCap:
+    def _ok(self, raw, close=175.0, **kw):
+        return th.validate_new_thesis(raw, close, CANDIDATES, set(), today=TODAY, **kw)
+
+    def test_bullish_within_cap_passes(self):
+        # zone high 178.5, inval 170 -> 4.8%
+        assert self._ok(raw_thesis(invalidation_price=170.0)) is None
+
+    def test_bullish_beyond_cap_rejected(self):
+        # NBTX: zone [43, 45.5], inval 40 -> 12.1% from the worst fill
+        r = self._ok(raw_thesis(entry_zone_low=43.0, entry_zone_high=45.5,
+                                invalidation_price=40.0, price_target=50.0), close=43.75)
+        assert r and "risk cap" in r and "12.1%" in r
+
+    def test_cap_is_measured_from_zone_high(self):
+        # inval 3% under the zone LOW but 6.5% under the zone HIGH -> rejected
+        r = self._ok(raw_thesis(entry_zone_low=172.0, entry_zone_high=178.5,
+                                invalidation_price=166.9))
+        assert r and "risk cap" in r
+        assert self._ok(raw_thesis(invalidation_price=166.9), max_risk_pct=0.10) is None
+
+    def test_bearish_mirror(self):
+        assert self._ok(bearish_thesis(invalidation_price=180.0)) is None      # 4.65% above zone low
+        r = self._ok(bearish_thesis(invalidation_price=185.0))                 # 7.56%
+        assert r and "risk cap" in r
+
+    def test_bearish_rejected_when_options_disabled(self):
+        r = self._ok(bearish_thesis(), opt_enabled=False)
+        assert r and "options, which are disabled" in r
+        assert self._ok(bearish_thesis(), opt_enabled=True) is None
+
+    def test_config_default_and_bound(self):
+        assert V2Config.MAX_RISK_PCT == 0.05
+        assert V2Config.MAX_RISK_PCT <= abs(V2Config.DISASTER_STOP_PCT)
+
+
+class TestRevisionRiskCap:
+    def test_loosening_past_cap_is_refused_and_recorded(self):
+        t = make_entered(100.0)          # zone [98, 102]
+        old = t["invalidation_price"]
+        th.apply_revision(t, {"invalidation_price": 90.0}, "give it room", TODAY, max_risk_pct=0.05)
+        assert t["invalidation_price"] == old
+        rec = t["revisions"][-1]
+        assert rec["changes"] == {} and rec["rejected"]["invalidation_price"] == [old, 90.0]
+        assert "11.8%" in rec["rejected"]["why"]
+
+    def test_tightening_within_cap_applies(self):
+        t = make_entered(100.0)
+        th.apply_revision(t, {"invalidation_price": 99.0}, "tighten", TODAY, max_risk_pct=0.05)
+        assert t["invalidation_price"] == 99.0 and "rejected" not in t["revisions"][-1]
+
+    def test_ttl_still_applies_when_invalidation_refused(self):
+        t = make_entered(100.0)
+        th.apply_revision(t, {"invalidation_price": 90.0, "ttl_days": 8}, "x", TODAY, max_risk_pct=0.05)
+        assert t["ttl_days"] == 8 and t["revisions"][-1]["changes"]["ttl_days"] == [5, 8]
+
+    def test_no_cap_means_no_check(self):
+        t = make_entered(100.0)
+        th.apply_revision(t, {"invalidation_price": 90.0}, "x", TODAY)
+        assert t["invalidation_price"] == 90.0
+
+    def test_bearish_measured_from_zone_low(self):
+        t = make_entered(100.0, direction="bearish")      # zone [98, 102]
+        assert th.revision_risk_breach(t, 102.5, 0.05) is None       # 4.6% above zone low
+        assert "above zone low" in th.revision_risk_breach(t, 104.0, 0.05)   # 6.1%
+
+
+class TestLessonFormat:
+    def test_format_with_and_without_count(self):
+        import trader_v2.store as store
+        assert store.format_lesson("X fails when Y", "NBTX -7%", "2026-09-02", 1) == \
+            "- [2026-09-02] (n=1) X fails when Y (evidence: NBTX -7%)"
+        assert store.format_lesson("X", "e", "2026-09-02") == "- [2026-09-02] X (evidence: e)"
+
+
+class TestExitFollowup:
+    def _evt(self, **over):
+        t = {"symbol": "LEU", "instrument": "shares", "entry_price": 186.665,
+             "exit_price": 189.01, "exit_reason": "trailing_stop", "pnl_pct": 1.2563}
+        t.update(over)
+        return {"ts": "2026-08-28T13:58:25Z", "event": "exit", "thesis": t}
+
+    def test_since_exit_pct_shows_the_trail_was_right(self):
+        from trader_v2.research import exit_followup
+        row = exit_followup(self._evt(), 168.31)
+        assert row["symbol"] == "LEU" and row["exit_date"] == "2026-08-28"
+        assert row["since_exit_pct"] == -10.95
+
+    def test_option_and_missing_price_give_none(self):
+        from trader_v2.research import exit_followup
+        assert exit_followup(self._evt(instrument="option"), 200.0)["since_exit_pct"] is None
+        assert exit_followup(self._evt(), None)["since_exit_pct"] is None
+        assert exit_followup({"ts": "", "event": "exit"}, 1.0)["symbol"] is None
 
 
 class TestHardGates:

@@ -127,10 +127,18 @@ def read_lessons() -> str:
     return "\n".join(reversed(kept))
 
 
-def append_lesson(lesson: str, evidence: str, today_iso: str):
+def format_lesson(lesson: str, evidence: str, today_iso: str, n_trades=None) -> str:
+    """One lessons.md line. `(n=k)` records how many distinct trades back the
+    lesson — the prompts treat small n as tentative, and the weekly curator
+    is told to preserve and sum the counts rather than escalate wording."""
+    tag = f" (n={int(n_trades)})" if n_trades else ""
+    return f"- [{today_iso}]{tag} {lesson} (evidence: {evidence})"
+
+
+def append_lesson(lesson: str, evidence: str, today_iso: str, n_trades=None):
     _ensure_dir()
     with open(LESSONS_FILE, "a") as f:
-        f.write(f"- [{today_iso}] {lesson} (evidence: {evidence})\n")
+        f.write(format_lesson(lesson, evidence, today_iso, n_trades) + "\n")
 
 
 def replace_lessons(text: str):
