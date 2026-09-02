@@ -23,7 +23,7 @@ DIRECTIONS = ("bullish", "bearish")
 
 MAX_ZONE_WIDTH_PCT = 0.15     # entry zone no wider than 15% of its low
 MAX_ZONE_DRIFT_PCT = 0.15     # zone must lie within ±15% of last close
-MAX_INVALIDATION_DEPTH = 0.15 # invalidation no deeper than 15% below zone low
+MAX_RISK_PCT = 0.05           # worst-case fill (zone high) -> invalidation, default cap
 TTL_RANGE = (1, 10)
 CONVICTION_RANGE = (1, 5)
 
@@ -111,14 +111,19 @@ def build_thesis(raw: dict, today: date, screen: dict = None) -> dict:
 def validate_new_thesis(raw: dict, last_close: float, candidate_symbols: set,
                         entered_symbols: set, blacklist: set = frozenset(),
                         crypto_suffixes: tuple = (), today: date = None,
-                        opt_min_conviction: int = 4) -> tuple:
+                        opt_min_conviction: int = 4, max_risk_pct: float = MAX_RISK_PCT,
+                        opt_enabled: bool = True) -> tuple:
     """Returns (error_string | None). Purely checks one raw thesis dict from
     the LLM against the guardrails; caller builds the thesis on success.
 
     Direction-aware: bullish geometry is invalidation < zone < target (long
     shares or calls); bearish inverts to target < zone < invalidation (long
     puts — the ONLY bearish expression, so bearish additionally requires
-    conviction >= opt_min_conviction)."""
+    conviction >= opt_min_conviction and options enabled).
+
+    Risk cap: the worst-case fill (zone high for bullish, zone low for
+    bearish) may sit at most max_risk_pct from the invalidation — the exits
+    truncate winners at low single digits, so risk must match."""
     try:
         sym = str(raw["symbol"]).upper()
         direction = str(raw.get("direction", "bullish"))
@@ -161,17 +166,23 @@ def validate_new_thesis(raw: dict, last_close: float, candidate_symbols: set,
     if direction == "bullish":
         if inval >= lo:
             return f"{sym}: invalidation {inval} must be below zone low {lo}"
-        if inval < lo * (1 - MAX_INVALIDATION_DEPTH):
-            return f"{sym}: invalidation {inval} deeper than {MAX_INVALIDATION_DEPTH:.0%} below zone"
+        risk = (hi - inval) / hi
+        if risk > max_risk_pct:
+            return (f"{sym}: invalidation {inval} is {risk:.1%} below zone high {hi} — "
+                    f"deeper than the {max_risk_pct:.0%} risk cap")
         if target <= hi:
             return f"{sym}: target {target} must exceed zone high {hi}"
     else:  # bearish: price falling is the thesis
         if inval <= hi:
             return f"{sym}: bearish invalidation {inval} must be above zone high {hi}"
-        if inval > hi * (1 + MAX_INVALIDATION_DEPTH):
-            return f"{sym}: bearish invalidation {inval} further than {MAX_INVALIDATION_DEPTH:.0%} above zone"
+        risk = (inval - lo) / lo
+        if risk > max_risk_pct:
+            return (f"{sym}: bearish invalidation {inval} is {risk:.1%} above zone low {lo} — "
+                    f"further than the {max_risk_pct:.0%} risk cap")
         if target >= lo:
             return f"{sym}: bearish target {target} must be below zone low {lo}"
+        if not opt_enabled:
+            return f"{sym}: bearish needs options, which are disabled (puts are its only expression)"
         if conviction < opt_min_conviction:
             return f"{sym}: bearish needs conviction >= {opt_min_conviction} (puts are its only expression)"
 
@@ -426,22 +437,49 @@ def apply_terminal(t: dict, status: str) -> dict:
     return t
 
 
-def apply_revision(t: dict, changes: dict, reasoning: str, today: date) -> dict:
+def revision_risk_breach(t: dict, new_inval: float, max_risk_pct):
+    """Reason string if moving an entered thesis's invalidation to new_inval
+    would put the worst-case zone fill more than max_risk_pct from it (the
+    same cap validation applies at creation), else None. Measured against the
+    zone, not entry_price, so it also holds for option theses (whose
+    entry_price is a premium). None cap = no check."""
+    if max_risk_pct is None or not t.get("entry_zone"):
+        return None
+    lo, hi = t["entry_zone"]
+    if t.get("direction", "bullish") == "bullish":
+        risk = (hi - new_inval) / hi
+        if risk > max_risk_pct:
+            return f"invalidation {new_inval} is {risk:.1%} below zone high {hi} (cap {max_risk_pct:.0%})"
+    else:
+        risk = (new_inval - lo) / lo
+        if risk > max_risk_pct:
+            return f"invalidation {new_inval} is {risk:.1%} above zone low {lo} (cap {max_risk_pct:.0%})"
+    return None
+
+
+def apply_revision(t: dict, changes: dict, reasoning: str, today: date,
+                   max_risk_pct: float = None) -> dict:
     """Research may revise invalidation_price and/or ttl_days on an ENTERED
-    thesis. Records the old values in `revisions`."""
+    thesis. Records the old values in `revisions`. An invalidation that would
+    breach the risk cap is refused and recorded under `rejected` instead."""
     if t["status"] != "entered":
         raise ValueError(f"cannot revise thesis {t['id']} in status {t['status']}")
     rec = {"ts": _now_iso(), "reasoning": reasoning, "changes": {}}
     if "invalidation_price" in changes and changes["invalidation_price"]:
-        rec["changes"]["invalidation_price"] = [t["invalidation_price"], float(changes["invalidation_price"])]
-        t["invalidation_price"] = float(changes["invalidation_price"])
+        new_inval = float(changes["invalidation_price"])
+        breach = revision_risk_breach(t, new_inval, max_risk_pct)
+        if breach:
+            rec["rejected"] = {"invalidation_price": [t["invalidation_price"], new_inval], "why": breach}
+        else:
+            rec["changes"]["invalidation_price"] = [t["invalidation_price"], new_inval]
+            t["invalidation_price"] = new_inval
     if "ttl_days" in changes and changes["ttl_days"]:
         new_ttl = int(changes["ttl_days"])
         if TTL_RANGE[0] <= new_ttl <= TTL_RANGE[1]:
             rec["changes"]["ttl_days"] = [t["ttl_days"], new_ttl]
             t["ttl_days"] = new_ttl
             t["expires"] = (today + timedelta(days=new_ttl)).isoformat()
-    if rec["changes"]:
+    if rec["changes"] or rec.get("rejected"):
         t["revisions"].append(rec)
     return t
 

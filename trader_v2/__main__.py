@@ -124,7 +124,7 @@ class V2Bot:
                 self.notif.send(f"nightly research FAILED: {e}", priority="high")
         if session_date.weekday() == 4 and run_state.get("last_weekly_date") != session_date.isoformat():
             try:
-                research.run_weekly(self.llm, self.notif)
+                research.run_weekly(self.llm, self.notif, self.alpaca)
                 run_state["last_weekly_date"] = session_date.isoformat()
                 store.save_run_state(run_state)
             except Exception as e:

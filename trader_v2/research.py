@@ -89,8 +89,10 @@ POSTMORTEM_TOOL = {
                     "properties": {
                         "lesson": {"type": "string"},
                         "evidence": {"type": "string"},
+                        "n_trades": {"type": "integer", "minimum": 1,
+                                     "description": "How many DISTINCT trades (this batch + follow-ups + existing evidence) actually support the lesson. Be honest: 1 means a single observation."},
                     },
-                    "required": ["lesson", "evidence"],
+                    "required": ["lesson", "evidence", "n_trades"],
                 },
             },
         },
@@ -129,6 +131,12 @@ EXECUTOR RULES (fixed — write theses that work WITH them):
   and your price_target is advisory. Let the trail do the exit; pick targets to express
   conviction, not to cap winners.
 - Unfilled theses expire after ttl_days calendar days.
+- RISK CAP (enforced in code): from entry_zone_high down to invalidation_price must be at
+  most {V2Config.MAX_RISK_PCT*100:.0f}% (bearish: zone low up to invalidation). The exits above cap winners at
+  low single digits, so a 7% invalidation is negative expectancy by construction. A thesis
+  breaching the cap is REJECTED; a revision that loosens past it is refused. If the level
+  that truly falsifies the thesis is further away, the zone is too high — move the zone
+  down to support or skip the name.
 - HARD GATES ARE ENFORCED IN CODE. A new thesis is REJECTED outright when its candidate
   row shows volume_ratio < {V2Config.GATE_MIN_VOLUME_RATIO:g}, |chg_5d_pct| > {V2Config.GATE_MAX_MOVE_5D_PCT:g}, or rsi_14 > {V2Config.GATE_MAX_RSI:g}
   (bullish; mirrored for bearish). Sizing down to a lower conviction does NOT get a
@@ -155,7 +163,11 @@ PORTFOLIO RULES:
 - Give a decision for EVERY entered position: keep, close, or revise
   (invalidation/ttl only).
 
-LESSONS FROM YOUR OWN TRADING HISTORY (earned, do not ignore):
+{"OPTIONS ARE CURRENTLY DISABLED: every thesis trades as shares; bearish theses cannot be expressed and are rejected — do not propose them, and do not request instrument: option." if not V2Config.OPT_ENABLED else ""}
+
+LESSONS FROM YOUR OWN TRADING HISTORY (earned, do not ignore). A lesson's (n=k) tag is
+the number of distinct trades behind it: n < {V2Config.LESSON_MIN_TRADES} is a tentative observation, not a
+rule — weigh it accordingly. The hard gates and risk cap are already enforced in code.
 {lessons or '(none yet)'}"""
 
 
@@ -163,7 +175,49 @@ LESSONS FROM YOUR OWN TRADING HISTORY (earned, do not ignore):
 # Post-mortem
 # ---------------------------------------------------------------------------
 
-def run_postmortem(llm, notif):
+def _price_now(alpaca, symbol):
+    if alpaca is None or not symbol:
+        return None
+    try:
+        return alpaca.get_latest_price(symbol)
+    except Exception as e:
+        logger.warning(f"follow-up price fetch failed for {symbol}: {e}")
+        return None
+
+
+def exit_followup(evt: dict, price_now) -> dict:
+    """How one past exit aged: price now vs the exit fill, as the reviewer
+    needs it. since_exit_pct is None for options (exit_price is a premium)
+    and when no price is available. Pure — tested."""
+    t = evt.get("thesis", {}) or {}
+    exit_price = t.get("exit_price")
+    row = {
+        "symbol": t.get("symbol"), "exit_date": str(evt.get("ts", ""))[:10],
+        "exit_reason": t.get("exit_reason") or evt.get("event"),
+        "entry_price": t.get("entry_price"), "exit_price": exit_price,
+        "pnl_pct": t.get("pnl_pct"), "price_now": price_now, "since_exit_pct": None,
+    }
+    if price_now and exit_price and t.get("instrument") != "option":
+        row["since_exit_pct"] = round((float(price_now) / float(exit_price) - 1) * 100, 2)
+    return row
+
+
+def _followups(alpaca, since: str, days: int) -> list:
+    """Exits older than `since` but within `days`, with their post-exit path.
+    The post-mortem only ever saw an exit on the night it happened — it
+    blamed the trailing stop for flat exits that all preceded further
+    declines. Now it also sees how the last N days of exits aged."""
+    if days <= 0:
+        return []
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    older = [e for e in store.read_journal_since(cutoff, events=["exit"])
+             if not since or e.get("ts", "") <= since]
+    return [exit_followup(e, _price_now(alpaca, (e.get("thesis") or {}).get("symbol")))
+            for e in older[-15:]]
+
+
+def run_postmortem(llm, notif, alpaca=None):
     run_state = store.load_run_state()
     since = run_state.get("last_postmortem_ts") or ""
     closed = store.read_journal_since(since, events=["exit", "thesis_expired"])
@@ -179,17 +233,27 @@ def run_postmortem(llm, notif):
         trades.append({
             "symbol": t.get("symbol"), "conviction": t.get("conviction"),
             "catalyst": t.get("catalyst"), "reasoning": t.get("reasoning"),
+            "screen_at_creation": t.get("screen"),
             "entry_zone": t.get("entry_zone"), "invalidation": t.get("invalidation_price"),
             "entry_price": t.get("entry_price"), "exit_price": t.get("exit_price"),
             "exit_reason": t.get("exit_reason") or evt.get("event"),
             "pnl_pct": t.get("pnl_pct"),
         })
+    followups = _followups(alpaca, since, V2Config.POSTMORTEM_FOLLOWUP_DAYS)
     system = ("You review your own closed trades against their original theses and extract "
               "AT MOST 3 durable, generalizable lessons. An empty list is a fine answer. "
               "Never restate a lesson that already exists. Lessons must be specific enough "
-              "to change future behavior ('X pattern fails when Y'), not platitudes.")
+              "to change future behavior ('X pattern fails when Y'), not platitudes. "
+              f"Report n_trades honestly — the DISTINCT trades supporting the lesson; "
+              f"below {V2Config.LESSON_MIN_TRADES} it is an observation, so never word it as URGENT, HARD, or "
+              "a rule. Before judging an EXIT rule (trailing stop, TTL, research close), "
+              "check the RECENT EXITS FOLLOW-UP: an exit that preceded a further decline "
+              "was right even if it booked a flat or small P&L. The hard gates and risk cap "
+              "are enforced in code — do not write lessons that merely restate them.")
     user = (f"EXISTING LESSONS:\n{store.read_lessons() or '(none)'}\n\n"
-            f"CLOSED TRADES SINCE LAST REVIEW:\n{json.dumps(trades, indent=1)}")
+            f"CLOSED TRADES SINCE LAST REVIEW:\n{json.dumps(trades, indent=1)}\n\n"
+            f"RECENT EXITS FOLLOW-UP (how earlier exits aged; since_exit_pct = price now vs exit):\n"
+            f"{json.dumps(followups, indent=1) if followups else '(none)'}")
     result = llm.call_structured(POSTMORTEM_TOOL, system=system,
                                  messages=[{"role": "user", "content": user}],
                                  model=V2Config.RESEARCH_MODEL, max_tokens=1000,
@@ -198,10 +262,16 @@ def run_postmortem(llm, notif):
     if isinstance(result, dict) and "lessons" in result:
         for item in result["lessons"][:3]:
             lesson, evidence = str(item.get("lesson", "")), str(item.get("evidence", ""))
+            try:
+                n_trades = max(1, int(item.get("n_trades") or 1))
+            except (TypeError, ValueError):
+                n_trades = 1
             if lesson:
-                store.append_lesson(lesson, evidence, today_iso)
-                store.journal(th.event("lesson_added", lesson=lesson, evidence=evidence))
-    store.journal(th.event("postmortem_run", n_trades=len(trades), usage=llm.last_usage))
+                store.append_lesson(lesson, evidence, today_iso, n_trades)
+                store.journal(th.event("lesson_added", lesson=lesson, evidence=evidence,
+                                       n_trades=n_trades))
+    store.journal(th.event("postmortem_run", n_trades=len(trades), n_followups=len(followups),
+                           usage=llm.last_usage))
     run_state = store.load_run_state()
     run_state["last_postmortem_ts"] = now_iso
     store.save_run_state(run_state)
@@ -295,7 +365,7 @@ def kept_count(entered: list) -> int:
 
 
 def run_nightly(alpaca, llm, discovery, notif):
-    run_postmortem(llm, notif)
+    run_postmortem(llm, notif, alpaca)
 
     theses = store.load_theses()
     entered = [t for t in theses if t["status"] == "entered"]
@@ -393,9 +463,12 @@ def run_nightly(alpaca, llm, discovery, notif):
         elif action == "revise":
             th.apply_revision(t, {"invalidation_price": d.get("revised_invalidation_price"),
                                   "ttl_days": d.get("revised_ttl_days")},
-                              d.get("reasoning", ""), today)
+                              d.get("reasoning", ""), today,
+                              max_risk_pct=V2Config.MAX_RISK_PCT)
+            last = t["revisions"][-1] if t["revisions"] else {}
             store.journal(th.event("thesis_revised", thesis_id=t["id"],
-                                   changes=t["revisions"][-1]["changes"] if t["revisions"] else {},
+                                   changes=last.get("changes", {}),
+                                   rejected=last.get("rejected"),
                                    reasoning=d.get("reasoning", "")))
         # keep -> no-op
 
@@ -411,7 +484,9 @@ def run_nightly(alpaca, llm, discovery, notif):
                                      blacklist=set(Config.BLACKLIST),
                                      crypto_suffixes=tuple(Config.CRYPTO_SUFFIXES),
                                      today=today,
-                                     opt_min_conviction=V2Config.OPT_MIN_CONVICTION)
+                                     opt_min_conviction=V2Config.OPT_MIN_CONVICTION,
+                                     max_risk_pct=V2Config.MAX_RISK_PCT,
+                                     opt_enabled=V2Config.OPT_ENABLED)
         if err:
             errors.append(err)
             continue
@@ -481,10 +556,11 @@ def coverage_note(journal_start: str, cutoff_iso: str, n_events: int) -> str:
     return f"JOURNAL COVERAGE: full 28-day window covered ({n_events} events)."
 
 
-def run_weekly(llm, notif):
+def run_weekly(llm, notif, alpaca=None):
     # trailing 4 weeks of journal, compacted
     from datetime import timedelta
     cutoff = (datetime.now(timezone.utc) - timedelta(days=28)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    followups = _followups(alpaca, "", 28)
     events = store.read_journal_since(cutoff, events=["exit", "entry", "circuit_breaker",
                                                       "research_run", "thesis_expired"])
     compact = []
@@ -496,6 +572,12 @@ def run_weekly(llm, notif):
               "trailing month of activity and the current lessons file. Honour the JOURNAL "
               "COVERAGE line: a period the journal does not cover is UNKNOWN, not inactive, "
               "and lessons whose evidence predates the journal must be kept, not dropped. "
+              "Lessons carry an (n=k) tag = distinct trades behind them: PRESERVE the tags, "
+              "sum distinct trades when you merge duplicates, and never escalate a lesson to "
+              f"URGENT/HARD/rule wording below n={V2Config.LESSON_MIN_TRADES}. Judge exit rules "
+              "against the EXITS FOLLOW-UP (price now vs exit): an exit followed by a further "
+              "decline was right regardless of its booked P&L. Hard gates and the risk cap "
+              "are enforced in code; lessons that merely restate them are noise. "
               "Output EXACTLY two "
               "sections:\n=== OBSERVATIONS ===\n(strategy-level observations, what is/isn't "
               "working, 5-10 bullets)\n=== LESSONS ===\n(the COMPLETE rewritten lessons file: "
@@ -503,6 +585,7 @@ def run_weekly(llm, notif):
               "format, drop stale or disproven lessons)")
     user = (f"{coverage_note(store.journal_start_ts(), cutoff, len(events))}\n\n"
             f"CURRENT LESSONS FILE:\n{store.read_lessons() or '(none)'}\n\n"
+            f"EXITS FOLLOW-UP (how each exit aged):\n{json.dumps(followups, indent=0) if followups else '(none)'}\n\n"
             f"LAST 4 WEEKS OF EVENTS:\n{json.dumps(compact, indent=0)}")
     text = llm.call(system=system, messages=[{"role": "user", "content": user}],
                     model=V2Config.WEEKLY_MODEL, temperature=None, max_tokens=2500)

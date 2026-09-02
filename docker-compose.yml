@@ -17,6 +17,10 @@ services:
       ALPACA_BASE_URL: https://api.alpaca.markets
       V2_REQUIRE_PAPER: "false"
       V2_CAPITAL_MODE: dynamic
+      # 2026-09-02: options OFF until the stock side shows an edge. The option
+      # path has never fired live; a first contract could lose 55% of a slot
+      # on an analyst with no demonstrated edge. Flip to "true" to re-enable.
+      V2_OPT_ENABLED: "false"
       DATA_DIR: /app/data/v2live
       NOTIFY_PROVIDER: ntfy
       NOTIFY_NTFY_TOPIC: ${V2_NTFY_TOPIC:-trading-agent}

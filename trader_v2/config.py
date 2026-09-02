@@ -37,6 +37,22 @@ class V2Config:
     GATE_MAX_MOVE_5D_PCT = float(os.getenv("V2_GATE_MAX_MOVE_5D_PCT", "7.0"))
     GATE_MAX_RSI = float(os.getenv("V2_GATE_MAX_RSI", "67"))
 
+    # --- per-thesis risk cap ------------------------------------------------
+    # Exits cap winners at low single digits (trail floor = entry, 5-day TTL),
+    # so a thesis whose invalidation sits 7% below the zone is negative
+    # expectancy by construction (NBTX: zone top 45.5, inval 40 -> -7.1%).
+    # Worst-case fill (zone high) to invalidation must be <= this; research
+    # rejects the thesis otherwise, and a revision may not loosen past it.
+    MAX_RISK_PCT = float(os.getenv("V2_MAX_RISK_PCT", "0.05"))
+
+    # --- lessons hygiene ----------------------------------------------------
+    # A lesson minted from ONE trade is an observation, not a rule. Lessons
+    # carry (n=k) trade counts; below this the prompts treat them as tentative.
+    LESSON_MIN_TRADES = int(os.getenv("V2_LESSON_MIN_TRADES", "3"))
+    # Post-mortem/weekly also see how each exit aged (price now vs exit) for
+    # exits within this many days, so exit lessons rest on the post-exit path.
+    POSTMORTEM_FOLLOWUP_DAYS = int(os.getenv("V2_POSTMORTEM_FOLLOWUP_DAYS", "10"))
+
     # --- risk rails ---------------------------------------------------------
     DAILY_LOSS_HALT_PCT = float(os.getenv("V2_DAILY_LOSS_HALT_PCT", "-0.05"))
     TRADING_ENABLED = os.getenv("V2_TRADING_ENABLED", "true").lower() == "true"
@@ -120,5 +136,7 @@ class V2Config:
         assert V2Config.CAPITAL_MODE in ("static", "dynamic")
         assert V2Config.GATE_MIN_VOLUME_RATIO >= 0 and V2Config.GATE_MAX_MOVE_5D_PCT >= 0
         assert 0 <= V2Config.GATE_MAX_RSI <= 100
+        assert 0 < V2Config.MAX_RISK_PCT <= abs(V2Config.DISASTER_STOP_PCT)
+        assert V2Config.LESSON_MIN_TRADES >= 1 and V2Config.POSTMORTEM_FOLLOWUP_DAYS >= 0
         from trader_v2.options import parse_stop_tiers
         parse_stop_tiers(V2Config.OPT_STOP_TIERS_SPEC)  # raises on a bad spec
