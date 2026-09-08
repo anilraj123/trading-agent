@@ -52,7 +52,13 @@ def _premium_of(alpaca, contract):
         return None
 
 
-def _wait_for_fill(alpaca, order_id, wait_sec):
+def _status_name(order):
+    """Bare lowercase order status, whether the SDK hands back an OrderStatus
+    enum ("OrderStatus.FILLED") or a plain string ("filled")."""
+    return str(getattr(order, "status", "")).lower().rsplit(".", 1)[-1]
+
+
+def _wait_for_fill(alpaca, order_id, wait_sec, poll_sec=5):
     """Poll an order until COMPLETELY filled or timeout. Returns
     (filled_qty, avg_price) — at timeout, whatever partial qty filled.
     Callers must cancel the remainder when filled_qty < requested."""
@@ -60,18 +66,43 @@ def _wait_for_fill(alpaca, order_id, wait_sec):
     while time.monotonic() < deadline:
         try:
             o = alpaca.get_order(order_id)
-            if str(getattr(o, "status", "")).lower().endswith("filled") and \
-                    not str(getattr(o, "status", "")).lower().startswith("partial"):
+            # str(OrderStatus.PARTIALLY_FILLED) is "OrderStatus.PARTIALLY_FILLED",
+            # so the old endswith("filled")/startswith("partial") pair called a
+            # PARTIAL fill complete. Compare the bare member name instead.
+            if _status_name(o) == "filled":
                 return float(o.filled_qty), float(o.filled_avg_price or 0) or None
         except Exception as e:
             logger.warning(f"order poll {order_id} failed: {e}")
-        time.sleep(5)
+        time.sleep(poll_sec)
     try:  # final look before giving up
         o = alpaca.get_order(order_id)
         filled = float(getattr(o, "filled_qty", 0) or 0)
         return filled, float(getattr(o, "filled_avg_price", 0) or 0) or None
     except Exception:
         return 0.0, None
+
+
+def _share_fill(alpaca, order, want_qty, quote):
+    """Broker truth for a share order: (filled_qty, avg_price, estimated).
+
+    A market order comes back from submit_order ACCEPTED, not filled — its
+    filled_avg_price is None every time — so reading the price off the submit
+    response silently records the PRE-TRADE QUOTE as the fill. That is what
+    corrupted every share P&L, every lesson minted from it, and (worse) the
+    entry anchor of the disaster stop before 2026-09-08: NBTX filled at 44.79,
+    was booked at 43.75, and its -8% stop consequently sat 2.4% too low, so a
+    -12.9% loss never tripped it. Options already polled; shares never did.
+
+    `estimated` True means we could not confirm a fill and fell back to the
+    quote — callers must say so loudly rather than book it as fact."""
+    order_id = getattr(order, "id", None)
+    if order_id is None:
+        return want_qty, quote, True
+    filled, avg = _wait_for_fill(alpaca, order_id, V2Config.SHARE_FILL_WAIT_SEC,
+                                 poll_sec=V2Config.SHARE_FILL_POLL_SEC)
+    if filled > 0 and avg:
+        return filled, avg, False
+    return want_qty, quote, True
 
 
 def _close_option(alpaca, t, premium_mid, urgent):
@@ -215,17 +246,31 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
                            f"(daytrade_count={daytrade_count}) — check manually", priority="high")
             continue
         try:
+            estimated, closed_qty = False, t["qty"]
             if t["instrument"] == "option":
                 fill = _close_option(alpaca, t, premium, urgent=reason in URGENT_OPTION_EXITS)
             else:
-                alpaca.close_position(t["symbol"])
-                fill = price
+                order = alpaca.close_position(t["symbol"])
+                closed_qty, fill, estimated = _share_fill(alpaca, order, t["qty"], price)
+                if not estimated and closed_qty < t["qty"] * 0.999:
+                    # The thesis closes regardless (it did exit); say so, because
+                    # the stub is untracked from here and reconcile never touches
+                    # an untracked position.
+                    notif.send(f"v2 PARTIAL EXIT {t['symbol']}: {closed_qty} of {t['qty']} "
+                               f"closed — the remainder is now UNTRACKED, flatten it by hand",
+                               priority="high")
             th.apply_exit(t, fill, reason)
             store.save_theses(theses)
             store.journal(th.event("exit", thesis_id=t["id"], symbol=t["symbol"],
                                    instrument=t["instrument"], qty=t["qty"], fill_price=fill,
+                                   closed_qty=closed_qty, quote_price=price,
+                                   fill_estimated=estimated,
                                    entry_price=t["entry_price"], pnl_pct=t["pnl_pct"],
                                    pnl_dollars=t["pnl_dollars"], reason=reason, thesis=t))
+            if estimated:
+                notif.send(f"v2: {t['symbol']} exit fill UNCONFIRMED after "
+                           f"{V2Config.SHARE_FILL_WAIT_SEC}s — P&L below is the quote, "
+                           f"not the fill", priority="high")
             label = th.broker_symbol(t) if t["instrument"] == "option" else t["symbol"]
             notif.send(f"v2 EXIT {label} [{reason}] {t['pnl_pct']:+.2f}% (${t['pnl_dollars']:+.2f})")
         except Exception as e:
@@ -347,16 +392,24 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
                         _skip(t, "no_cash", price)
                         continue
                     order = alpaca.submit_market_order(t["symbol"], OrderSide.BUY, qty)
-                    fill = float(getattr(order, "filled_avg_price", 0) or 0) or price
-                    th.apply_fill(t, fill, qty, getattr(order, "id", None))
+                    filled, fill, estimated = _share_fill(alpaca, order, qty, price)
+                    th.apply_fill(t, fill, filled, getattr(order, "id", None))
                     store.save_theses(theses)   # persist immediately after each fill
                     store.journal(th.event("entry", thesis_id=t["id"], symbol=t["symbol"],
-                                           instrument="shares", qty=qty,
+                                           instrument="shares", qty=filled,
+                                           requested_qty=qty, quote_price=price,
                                            requested_notional=round(qty * price, 2),
-                                           fill_price=fill, fallback_reason=fallback_reason,
+                                           slippage_pct=round((fill / price - 1) * 100, 4) if price else None,
+                                           fill_price=fill, fill_estimated=estimated,
+                                           fallback_reason=fallback_reason,
                                            order_id=str(getattr(order, "id", ""))))
-                    notif.send(f"v2 ENTRY {t['symbol']} {qty} @ ${fill:.2f} (thesis {t['id']}, conviction {t['conviction']})")
-                    avail_cash -= qty * fill
+                    if estimated:
+                        notif.send(f"v2: {t['symbol']} entry fill UNCONFIRMED after "
+                                   f"{V2Config.SHARE_FILL_WAIT_SEC}s — booked the quote "
+                                   f"${fill:.2f}; its stops are anchored on an estimate",
+                                   priority="high")
+                    notif.send(f"v2 ENTRY {t['symbol']} {filled} @ ${fill:.2f} (thesis {t['id']}, conviction {t['conviction']})")
+                    avail_cash -= filled * fill
                 entered_count += 1
                 held_syms.add(t["symbol"])
             except Exception as e:
