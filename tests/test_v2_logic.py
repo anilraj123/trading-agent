@@ -283,18 +283,23 @@ class TestBreakerAndEvents:
 class TestLessonsBounding:
     def test_truncates_oldest_keeps_newest(self, tmp_path):
         import trader_v2.store as store
-        orig = store.LESSONS_FILE
+        orig, orig_max = store.LESSONS_FILE, V2Config.LESSONS_MAX_CHARS
         store.LESSONS_FILE = str(tmp_path / "lessons.md")
+        # Pinned here, not via the env at the top of this module: read_lessons
+        # reads V2Config at call time, and the env pin only wins if this module
+        # is the first to import config — which any new, alphabetically earlier
+        # test module silently takes away.
+        V2Config.LESSONS_MAX_CHARS = 200
         try:
             for i in range(20):
                 store.append_lesson(f"lesson number {i:02d} with padding text", "ev", "2026-07-17")
-            text = store.read_lessons()   # bounded at 200 chars by env pin
+            text = store.read_lessons()
             assert len(text) <= 200
             assert "lesson number 19" in text      # newest kept
             assert "lesson number 00" not in text  # oldest dropped
             assert all(line.startswith("- [") for line in text.splitlines())
         finally:
-            store.LESSONS_FILE = orig
+            store.LESSONS_FILE, V2Config.LESSONS_MAX_CHARS = orig, orig_max
 
     def test_empty_file(self, tmp_path):
         import trader_v2.store as store

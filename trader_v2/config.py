@@ -22,6 +22,15 @@ class V2Config:
     # Thesis invalidation is evaluated ONLY in the close window: intraday
     # tight stops on a daily-horizon signal went 0-for-11 live in v1.
     DISASTER_STOP_PCT = float(os.getenv("V2_DISASTER_STOP_PCT", "-0.08"))   # every cycle
+
+    # --- share fill confirmation --------------------------------------------
+    # A share market order returns ACCEPTED with filled_avg_price None, so the
+    # executor must POLL for the broker's own average — see _share_fill. Market
+    # orders fill in well under a second in RTH; this budget only covers a
+    # stalled venue, and a timeout books the quote and shouts about it.
+    SHARE_FILL_WAIT_SEC = int(os.getenv("V2_SHARE_FILL_WAIT_SEC", "30"))
+    SHARE_FILL_POLL_SEC = float(os.getenv("V2_SHARE_FILL_POLL_SEC", "1"))
+
     TRAIL_ACTIVATE_PCT = float(os.getenv("V2_TRAIL_ACTIVATE_PCT", "0.03"))
     TRAIL_STOP_PCT = float(os.getenv("V2_TRAIL_STOP_PCT", "-0.03"))
     CLOSE_WINDOW_MIN = int(os.getenv("V2_CLOSE_WINDOW_MIN", "25"))          # > cycle + runtime
@@ -144,6 +153,7 @@ class V2Config:
         assert 1 <= V2Config.MAX_POSITIONS <= V2Config.MAX_THESES <= 10
         assert V2Config.DISASTER_STOP_PCT < V2Config.TRAIL_STOP_PCT < 0
         assert V2Config.CLOSE_WINDOW_MIN > V2Config.CYCLE_MINUTES
+        assert 0 < V2Config.SHARE_FILL_POLL_SEC <= V2Config.SHARE_FILL_WAIT_SEC
         assert 0 < V2Config.OPT_DELTA_MIN < V2Config.OPT_DELTA_MAX <= 1
         assert 0 < V2Config.OPT_DTE_MIN < V2Config.OPT_DTE_MAX
         assert 0 < V2Config.OPT_MAX_PREMIUM_PCT <= V2Config.OPT_SLEEVE_CAP_PCT <= 1
