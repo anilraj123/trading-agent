@@ -231,7 +231,8 @@ def run_cycle(alpaca, notif, clock, cycle_count: int):
         else:
             th.update_trail(t, price, V2Config.TRAIL_ACTIVATE_PCT)
             reason = th.exit_decision(t, price, close_window, V2Config.DISASTER_STOP_PCT,
-                                      V2Config.TRAIL_STOP_PCT, today)
+                                      V2Config.TRAIL_STOP_PCT, today,
+                                      trail_floor_at_entry=V2Config.TRAIL_FLOOR_AT_ENTRY)
         if not reason:
             continue
         if kill_switch:

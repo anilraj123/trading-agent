@@ -357,8 +357,31 @@ def update_trail(t: dict, price: float, activate_pct: float) -> bool:
     return changed
 
 
+def trail_stop_level(t: dict, trail_pct: float, floor_at_entry: bool = True):
+    """Price at or below which an ARMED trail exits, or None.
+
+    The raw level gives back `trail_pct` of the high-water mark. At the +3%
+    arming point that lands BELOW the entry (1.03 × 0.97 = 0.9991), so arming
+    the trail used to guarantee a small LOSS — SMR armed at +3.0% and exited
+    -0.14%. Flooring at entry aims an armed exit at the entry instead; the
+    realized fill still depends on the 15-min sample and slippage, so this
+    targets breakeven rather than guaranteeing it.
+
+    Note the floor only binds while hwm < entry / (1 + trail_pct) (~+3.09% at
+    the defaults). It removes the losing-trail case; it does NOT stop a winner
+    being truncated — LEU peaked +3.67% and still exits at +0.56%, because the
+    give-back is set by trail_pct, not by this floor."""
+    if not t.get("hwm"):
+        return None
+    level = t["hwm"] * (1 + trail_pct)
+    if floor_at_entry and t.get("entry_price"):
+        level = max(level, t["entry_price"])
+    return level
+
+
 def exit_decision(t: dict, price: float, close_window: bool,
-                  disaster_pct: float, trail_pct: float, today: date):
+                  disaster_pct: float, trail_pct: float, today: date,
+                  trail_floor_at_entry: bool = True):
     """First matching exit reason for an entered thesis, or None.
 
     Precedence: disaster (every cycle) > research close > invalidation
@@ -372,8 +395,10 @@ def exit_decision(t: dict, price: float, close_window: bool,
         return "research_close"
     if close_window and price <= t["invalidation_price"]:
         return "invalidation"
-    if t["trailing"] and t["hwm"] and price <= t["hwm"] * (1 + trail_pct):
-        return "trailing_stop"
+    if t["trailing"]:
+        level = trail_stop_level(t, trail_pct, trail_floor_at_entry)
+        if level and price <= level:
+            return "trailing_stop"
     if close_window and today >= date.fromisoformat(t["expires"]):
         return "ttl_expiry"
     return None

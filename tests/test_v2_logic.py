@@ -22,6 +22,8 @@ os.environ["V2_TRAIL_STOP_PCT"] = "-0.03"
 os.environ["V2_DAILY_LOSS_HALT_PCT"] = "-0.05"
 os.environ["V2_LESSONS_MAX_CHARS"] = "200"   # small bound for testing
 
+import pytest
+
 from trader_v2 import thesis as th
 from trader_v2.config import V2Config
 
@@ -180,6 +182,55 @@ class TestExitPrecedence:
     def test_no_exit_healthy(self):
         t = make_entered(100.0)
         assert th.exit_decision(t, 101.0, True, -0.08, -0.03, TODAY) is None
+
+
+class TestTrailFloorAtEntry:
+    """The trail gives back 3% of the HWM, and at the +3% arming point that
+    lands at entry x 1.03 x 0.97 = 0.9991 -- BELOW the entry. Arming the trail
+    therefore used to guarantee a small loss. The floor fixes that case."""
+
+    def test_floor_binds_at_the_arming_point(self):
+        t = make_entered(100.0, trailing=True, hwm=103.0)
+        assert th.trail_stop_level(t, -0.03, False) == pytest.approx(99.91)
+        assert th.trail_stop_level(t, -0.03, True) == 100.0
+
+    def test_floor_does_not_bind_once_hwm_clears_it(self):
+        # binds only while hwm < entry / 0.97 = +3.093%
+        t = make_entered(100.0, trailing=True, hwm=110.0)
+        assert th.trail_stop_level(t, -0.03, True) == pytest.approx(106.7)
+        assert th.trail_stop_level(t, -0.03, False) == pytest.approx(106.7)
+
+    def test_disabled_restores_the_raw_give_back(self):
+        t = make_entered(100.0, trailing=True, hwm=103.0)
+        assert th.exit_decision(t, 99.95, False, -0.08, -0.03, TODAY,
+                                trail_floor_at_entry=True) == "trailing_stop"
+        assert th.exit_decision(t, 99.95, False, -0.08, -0.03, TODAY,
+                                trail_floor_at_entry=False) is None
+
+    def test_no_hwm_no_level(self):
+        assert th.trail_stop_level(make_entered(100.0, trailing=True, hwm=None), -0.03) is None
+
+    def test_smr_regression(self):
+        """SMR really armed at hwm 9.706 (+3.0% on a 9.4279 fill) and exited
+        9.4151 = -0.14%. The floor would have aimed that exit at the entry."""
+        t = make_entered(9.4279, trailing=True, hwm=9.706)
+        assert th.trail_stop_level(t, -0.03, False) < 9.4279     # old: a loss
+        assert th.trail_stop_level(t, -0.03, True) == 9.4279     # new: breakeven
+
+    def test_leu_is_unchanged_truncation_is_not_fixed_by_this(self):
+        """LEU peaked at 193.71 (+3.67% on a 186.8552 fill) and exited 187.90
+        = +0.56%. The floor does NOT bind there -- the give-back is trail_pct's
+        doing, so this change leaves winner truncation exactly as it was."""
+        t = make_entered(186.8552, trailing=True, hwm=193.71)
+        raw = th.trail_stop_level(t, -0.03, False)
+        assert th.trail_stop_level(t, -0.03, True) == raw
+        assert raw == pytest.approx(187.899, abs=0.01)
+
+    def test_armed_exit_never_below_entry(self):
+        """The invariant this buys: no armed trail exits under the entry."""
+        for hwm in (103.0, 103.05, 103.1, 105.0, 120.0):
+            t = make_entered(100.0, trailing=True, hwm=hwm)
+            assert th.trail_stop_level(t, -0.03, True) >= 100.0
 
 
 class TestTrail:
