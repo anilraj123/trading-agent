@@ -33,6 +33,11 @@ class V2Config:
 
     TRAIL_ACTIVATE_PCT = float(os.getenv("V2_TRAIL_ACTIVATE_PCT", "0.03"))
     TRAIL_STOP_PCT = float(os.getenv("V2_TRAIL_STOP_PCT", "-0.03"))
+    # Once armed, the trail never sits below the entry. hwm × (1 + TRAIL_STOP_PCT)
+    # at the arming point is entry × 1.03 × 0.97 = 0.9991 × entry, so arming used
+    # to guarantee a small loss (SMR: armed +3.0%, exited -0.14%). Set false to
+    # restore the raw give-back without a redeploy.
+    TRAIL_FLOOR_AT_ENTRY = os.getenv("V2_TRAIL_FLOOR_AT_ENTRY", "true").lower() == "true"
     CLOSE_WINDOW_MIN = int(os.getenv("V2_CLOSE_WINDOW_MIN", "25"))          # > cycle + runtime
 
     # --- entry hard gates (deterministic, applied to every NEW thesis) ------
