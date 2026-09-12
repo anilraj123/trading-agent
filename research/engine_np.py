@@ -11,15 +11,14 @@ research/verify_np.py proves this reproduces engine.run exactly.
 """
 import numpy as np
 
-from research.engine import Params, indicators, qualified
+from research.params import Params
 
 
 def prepare(frames, ind, sectors=None):
-    """Dense arrays + integer sector ids. Pandas is used here and nowhere else."""
+    """Dense arrays + integer sector ids. Pandas is used HERE AND NOWHERE ELSE,
+    and is imported lazily so farm nodes can import this module without it."""
     close = frames["close"]
     syms = list(close.columns)
-    q = qualified(ind, close, Params()).columns      # column order sanity
-    assert list(q) == syms
     sec_names = sorted({(sectors or {}).get(s) for s in syms} - {None})
     sec_id = {n: i for i, n in enumerate(sec_names)}
     return {

@@ -11,7 +11,7 @@ underperformers), which flatters results. Treat absolute returns from this
 universe as an UPPER BOUND, and prefer conclusions that compare strategies
 against each other on the same biased sample.
 """
-import json, os, sys, time
+import json, os, re, sys, time
 from datetime import datetime
 from pathlib import Path
 
@@ -43,16 +43,35 @@ def _client():
 
 
 def fetch(symbols, start=START, chunk=CHUNK):
-    c, frames = _client(), []
+    c, frames, dropped = _client(), [], []
     for i in range(0, len(symbols), chunk):
         part = symbols[i:i + chunk]
         t0 = time.time()
-        df = c.get_stock_bars(StockBarsRequest(
-            symbol_or_symbols=part, timeframe=TimeFrame.Day, start=start)).df
+        # Historical members include tickers Alpaca never carried; one bad
+        # symbol 400s the WHOLE chunk, so drop offenders and retry rather
+        # than losing 200 symbols to one of them.
+        while True:
+            try:
+                df = c.get_stock_bars(StockBarsRequest(
+                    symbol_or_symbols=part, timeframe=TimeFrame.Day, start=start)).df
+                break
+            except Exception as e:
+                m = re.search(r"invalid symbol:\s*([A-Z.\-]+)", str(e))
+                if not m or m.group(1) not in part:
+                    raise
+                part.remove(m.group(1)); dropped.append(m.group(1))
+                if not part:
+                    df = None
+                    break
+        if df is None:
+            continue
         frames.append(df)
         got = df.index.get_level_values(0).nunique()
         print(f"  [{i + len(part):4d}/{len(symbols)}] {time.time() - t0:6.1f}s "
               f"rows={len(df):8d} symbols={got}/{len(part)}", flush=True)
+    if dropped:
+        print(f"  dropped {len(dropped)} symbols Alpaca has no data for: "
+              f"{', '.join(dropped[:15])}{' ...' if len(dropped) > 15 else ''}")
     return pd.concat(frames)
 
 

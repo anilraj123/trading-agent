@@ -13,7 +13,45 @@ bar cache) → any of the `run_*`/`sweep_*`/`wf_*` scripts. Local venv:
 | `validate_engine.py` | engine sanity: exits off must ≈ buy-and-hold |
 | `control_momentum.py` | harness sanity: can it find edge known to exist? |
 
-## ⚠️ Survivorship bias — read before quoting any number
+## ✅ RESOLVED: the survivorship bias is now fixed — and it overturned a finding
+
+`pit_universe.py` + `pit_data.py` build a **point-in-time** universe: index
+membership as Wikipedia recorded it at each historical month-end, and bars for
+1,213 symbols including the casualties (SIVB, FRC, TWTR...). A name is only
+buyable on bars where it was ACTUALLY a member.
+
+Re-running the same strategies on unbiased data (`run_pit.py`):
+
+| strategy | biased (today's index) | **point-in-time** | bias |
+|---|---|---|---|
+| live config | −71.1% | **−77.2%** | 6 pts |
+| live screen, 60-day hold | +311.1% | **−64.9%** | **376 pts** |
+| 6-1 momentum | +5451.8% | **+430.8%** | **5021 pts** |
+
+**This refutes finding 3 below as it was originally written.** "The exits do the
+damage, the entries are fine" was an artefact: the +311% for the screen with
+sane exits was almost entirely survivorship. On unbiased data that same
+configuration returns **−64.9%, alpha −337%**. The screen has no edge at ANY
+holding period — the entries are not fine, and fixing the exits alone would not
+have saved it.
+
+Momentum survives but shrinks **12x**, and its point-in-time alpha is
+concentrated in one regime:
+
+    6-1 momentum alpha   2020-21: +269.0   2022-23: -43.1   2024-25: -1.4   2026: +32.0
+
+Two of four periods are negative or flat. The biased walk-forward's "4/4 folds
+positive" was the bias talking. There may be an edge here, but it is regime-
+dependent and nothing like as strong as it first looked.
+
+### What is still imperfect
+299 of 1,513 ever-members are absent from Alpaca's asset list (mostly pre-2019
+acquisitions and renames: AET, ABMD, ABC) — listed in `_cache/pit_unavailable.json`.
+Those are mostly *benign* exits (acquired at a premium), so the residual bias is
+much smaller than the one removed, and points the wrong way for momentum if
+anything. Bankruptcies and failures — the ones that matter — ARE included.
+
+## ⚠️ Historical note: the bias, before it was fixed
 
 `universe.json` is **today's** S&P 500+400 membership. Backtesting it over
 history excludes every company dropped from the index, so **absolute returns

@@ -30,6 +30,18 @@ API = "https://en.wikipedia.org/w/api.php"
 PAGES = {"sp500": "List of S&P 500 companies", "sp400": "List of S&P 400 companies"}
 
 SYM_COLS = ("symbol", "ticker symbol", "ticker")
+# A "changes to the index" table also has a column called Ticker, and on the
+# S&P 400 page it eventually grows LONGER than the constituent table -- so
+# "pick the table with the most symbols" silently starts returning every
+# ticker ever added, which is the opposite of point-in-time. Reject any table
+# carrying these columns; only the constituent table lacks all of them.
+CHANGE_COLS = ("date", "added", "removed", "reason")
+
+
+def _class_share(sym: str) -> str:
+    """BRK-B -> BRK.B. Only a single trailing one-letter class suffix is
+    rewritten; ordinary tickers are untouched."""
+    return re.sub(r"^([A-Z]+)-([A-Z])$", r"\1.\2", sym)
 
 
 def month_ends(start=(2016, 1), end=(2026, 9)):
@@ -78,10 +90,14 @@ def symbols_from_revision(session, revid):
     for t in tables:
         cols = [str(c).split("'")[-2].lower() if "(" in str(c) else str(c).lower()
                 for c in t.columns]
+        if any(c.strip() in CHANGE_COLS for c in cols):
+            continue                              # a changes table, not membership
         hit = next((i for i, c in enumerate(cols) if c.strip() in SYM_COLS), None)
         if hit is None or len(t) < 50:            # constituent tables are long
             continue
-        syms = [re.sub(r"[^A-Z.\-]", "", str(s).upper()).replace(".", "-")
+        # Alpaca wants the DOT form for class shares (BF.B, BRK.B, MOG.A);
+        # Wikipedia uses either, so normalise dashes TO dots, not away from them.
+        syms = [_class_share(re.sub(r"[^A-Z.\-]", "", str(s).upper()))
                 for s in t.iloc[:, hit].tolist()]
         syms = [s for s in syms if 1 <= len(s) <= 6]
         if len(syms) > len(best):

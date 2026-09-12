@@ -45,8 +45,31 @@ def ever_members():
     return sorted(s)
 
 
+def alpaca_symbols():
+    """Every us_equity symbol Alpaca knows, active or inactive. Historical
+    members include ~300 tickers it never carried (mostly pre-2019
+    acquisitions and renames: AET, ABMD, ABC...). Asking for one 400s the
+    whole chunk, so filter up front instead of discovering them one retry at
+    a time."""
+    import os, requests
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+    h = {"APCA-API-KEY-ID": os.getenv("ALPACA_API_KEY"),
+         "APCA-API-SECRET-KEY": os.getenv("ALPACA_SECRET_KEY")}
+    r = requests.get("https://api.alpaca.markets/v2/assets", headers=h,
+                     params={"asset_class": "us_equity"}, timeout=120)
+    r.raise_for_status()
+    return {a["symbol"] for a in r.json()}
+
+
 def build_bars(extra=("SPY",)):
-    syms = sorted(set(ever_members()) | set(extra))
+    known = alpaca_symbols()
+    ever = set(ever_members())
+    missing = sorted(ever - known)
+    (CACHE / "pit_unavailable.json").write_text(json.dumps(missing, indent=1))
+    print(f"ever-members {len(ever)}; Alpaca has {len(ever & known)}; "
+          f"no data for {len(missing)} (listed in pit_unavailable.json)")
+    syms = sorted((ever & known) | set(extra))
     print(f"fetching {len(syms)} ever-members (vs {len(_data.universe_symbols()[0])} current)")
     df = _data.fetch(syms)
     df.to_parquet(PIT_BARS)
