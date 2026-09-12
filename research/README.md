@@ -66,6 +66,32 @@ comparison for that reason.
 Resolving this needs point-in-time index membership (or a delisting-inclusive
 universe). Until then, no number here justifies sizing real money.
 
+## THE BOTTOM LINE (point-in-time walk-forward, the only test that counts)
+
+Parameters chosen on a train window, scored on a later window never looked at,
+in a universe containing the companies the index threw away:
+
+| family | configs | mean OOS alpha | median | folds positive |
+|---|---|---|---|---|
+| 6-1 / 12-1 momentum | 128 | +15.2% | **−26.4%** | **1/4** |
+| live screen (exits swept) | 72 | −22.0% | −20.2% | **1/4** |
+
+Momentum's positive MEAN is one fold: 2026, +149.8% alpha on **16 trades** in
+eight months. The other three are −36.4, −33.3, −19.4. The median is −26.4%.
+
+**Neither family has a tradeable edge.** Buying and holding SPY beat every
+single configuration tested, in both families, on unbiased data.
+
+### The one thing that replicated everywhere
+`invalidation_pct = OFF` was selected in **16/16 fold-selections** — both
+families, both universes, biased and point-in-time. In the biased run the
+invalidation exit alone was 315 trades at a **0% win rate** for −$22,768. The
+live LLM analyst independently reached the same conclusion on 2026-09-11 after
+SBAC's −2.39% invalidation exit round-tripped straight back to entry.
+
+That is a real, replicated, loss-REDUCING finding. It does not make the
+strategy profitable; it makes it lose less.
+
 ## Findings
 
 **1. The engine is sound.** Exits disabled → +189% (screen) / +348% (no
