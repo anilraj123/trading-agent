@@ -34,7 +34,45 @@ def prepare(frames, ind, sectors=None):
     }
 
 
+def _trend_ok(A, p):
+    if not p.trend_filter_sma200:
+        return None
+    s200 = A["ind"].get("sma_200")
+    if s200 is None:
+        return None
+    with np.errstate(invalid="ignore"):
+        return ~np.isnan(s200) & (A["close"] > s200)
+
+
 def qualified_np(A, p: Params):
+    """Entry eligibility [date x symbol] for the configured signal family."""
+    if p.signal == "meanrev":
+        # Buy short-term oversold inside a long-term uptrend, and sell the
+        # bounce. Opposite sign to every momentum/breakout family tested
+        # before: this BUYS weakness rather than strength.
+        ind, close = A["ind"], A["close"]
+        with np.errstate(invalid="ignore"):
+            ok = ~np.isnan(close) & ~np.isnan(ind["rsi_2"]) & (ind["rsi_2"] <= p.rsi2_max)
+            if p.dist_sma20_max < 0:
+                d = ind["dist_sma20_pct"]
+                ok &= ~np.isnan(d) & (d <= p.dist_sma20_max)
+            t = _trend_ok(A, p)
+            if t is not None:
+                ok &= t
+        return ok
+    if p.signal == "gapfade":
+        # Buy a down-gap at the open expecting it to fill. The gap is known AT
+        # the open, so run_np reads this family's signal from the CURRENT bar;
+        # that is not look-ahead, but filling exactly at the official open
+        # print is optimistic -- sweep cost_bps to see how much that matters.
+        ind, close = A["ind"], A["close"]
+        g = ind["gap_pct"]
+        with np.errstate(invalid="ignore"):
+            ok = ~np.isnan(g) & (g <= p.gap_max_pct)
+            t = _trend_ok(A, p)
+            if t is not None:
+                ok &= np.vstack([np.zeros((1, t.shape[1]), bool), t[:-1]])  # prior close
+        return ok
     ind, close = A["ind"], A["close"]
     rsi = ind["rsi_14"]
     ok = ~np.isnan(close) & ~np.isnan(rsi)
@@ -121,19 +159,26 @@ def run_np(A, p: Params, start_i=60, end_i=None, capital=10000.0, membership=Non
                 trailing[j] = True
             heldn[j] += 1
 
-        # 3. entries at this open from the PREVIOUS bar's screen
+        # 3. entries at this open. Signals come from the PREVIOUS bar's close,
+        #    except gapfade, whose trigger (the gap) is only observable at THIS
+        #    open -- the bar we transact on, so it is not look-ahead.
         n_held = int(held.sum())
+        si = i if p.signal == "gapfade" else i - 1
         # engine.run has `prev is None` on its first bar and so cannot enter
         # there; k == 0 is that same bar. Matching it keeps the two identical.
         if k > 0 and n_held < p.max_positions:
-            elig = qual[i - 1].copy()
+            elig = qual[si].copy()
             if membership is not None:
-                elig &= membership[i - 1]
+                elig &= membership[si]
             elig &= ~held
             cand = np.flatnonzero(elig)
             if cand.size:
-                m = np.nan_to_num(metric[i - 1][cand], nan=-np.inf)
-                cand = cand[np.argsort(-m, kind="stable")]   # see engine.ranked_signals
+                m = np.nan_to_num(metric[si][cand], nan=-np.inf)
+                # meanrev/gapfade rank by MOST oversold / LARGEST gap, i.e.
+                # ascending, where the momentum families rank descending.
+                order = np.argsort(m, kind="stable") if p.signal in ("meanrev", "gapfade") \
+                    else np.argsort(-m, kind="stable")
+                cand = cand[order]
                 pv = np.nansum(shares[held] * np.nan_to_num(ci[held], nan=0.0))
                 equity_now = cash + pv
                 sec_count = np.bincount(sector[held][sector[held] >= 0],

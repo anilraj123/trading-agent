@@ -26,6 +26,12 @@ class Params:
     invalidation_pct: float = -0.05        # proxy for the analyst's invalidation
     # frictions
     cost_bps: float = 10.0                 # per side, in basis points
+    # entry family: "screen" (the live profile) | "meanrev" | "gapfade"
+    signal: str = "screen"
+    trend_filter_sma200: bool = True       # only buy above the 200d (long-side quality)
+    rsi2_max: float = 10.0                 # meanrev: RSI(2) oversold trigger
+    dist_sma20_max: float = 0.0            # meanrev: require close this % BELOW sma20 (0=off)
+    gap_max_pct: float = -3.0              # gapfade: buy gaps at or below this
     # ranking
     rank_by: str = "volume_ratio"
 

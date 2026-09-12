@@ -49,6 +49,12 @@ def indicators(frames: dict) -> dict:
     close, volume = frames["close"], frames["volume"]
     return {
         "atr_pct": atr_wide(frames, 14),
+        # short-horizon entry families
+        "rsi_2": rsi_wide(close, 2),                       # Connors-style oversold
+        "sma_200": close.rolling(200).mean(),
+        "dist_sma20_pct": (close / close.rolling(20).mean() - 1) * 100,
+        "gap_pct": (frames["open"] / close.shift(1) - 1) * 100,
+        "down_days": (close.diff() < 0).rolling(3).sum(),  # consecutive-ish weakness
         "rsi_14": rsi_wide(close, 14),
         "sma_20": close.rolling(20).mean().round(2),
         "sma_50": close.rolling(50).mean().round(2),

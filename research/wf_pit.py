@@ -55,7 +55,10 @@ def grid(space):
     k = list(space)
     return [dict(zip(k, v)) for v in itertools.product(*(space[x] for x in k))]
 
-def walk(space, name, objective="sharpe"):
+MIN_TEST_TRADES = 20   # a 2-trade test fold can post huge alpha; see README
+
+
+def walk(space, name, objective="sharpe", min_test_trades=MIN_TEST_TRADES):
     from multiprocessing import Pool
     combos = grid(space)
     print(f"\n{'='*78}\n{name}: {len(combos)} configs x {len(FOLDS)} folds (point-in-time)\n{'='*78}")
@@ -69,6 +72,10 @@ def walk(space, name, objective="sharpe"):
         best = tr.sort_values(objective, ascending=False).iloc[0]
         cfg = {k: best[k] for k in combos[0]}
         m = score(cfg, vs, ve); m["fold"]=i
+        # Floor the TEST trade count too. Without this a degenerate config
+        # that happens to hold 2 names through a good window posts +900%
+        # alpha and wins the study on noise.
+        m["_thin"] = m["n_trades"] < min_test_trades
         rows.append(m)
         keys = {k:v for k,v in cfg.items() if k in ("rank_by","ttl_days","max_positions","require_trend","disaster_stop_pct","invalidation_pct","trail_activate_pct")}
         print(f"  fold {i} test {vs[:7]}..{ve[:7]}  chose {keys}")
@@ -77,8 +84,14 @@ def walk(space, name, objective="sharpe"):
               f"   DD {m['max_dd_pct']:+7.2f}%   trades {m['n_trades']}")
     r = pd.DataFrame(rows)
     if not r.empty:
-        print(f"\n  MEAN OOS alpha {r.alpha_pct.mean():+.2f}%   folds positive {(r.alpha_pct>0).sum()}/{len(r)}"
-              f"   median alpha {r.alpha_pct.median():+.2f}%")
+        thick = r[~r._thin]
+        print(f"\n  ALL folds:   mean alpha {r.alpha_pct.mean():+8.2f}%   positive {(r.alpha_pct>0).sum()}/{len(r)}"
+              f"   median {r.alpha_pct.median():+8.2f}%")
+        if len(thick) < len(r):
+            print(f"  EXCL. THIN:  mean alpha "
+                  + (f"{thick.alpha_pct.mean():+8.2f}%   positive {(thick.alpha_pct>0).sum()}/{len(thick)}"
+                     f"   median {thick.alpha_pct.median():+8.2f}%" if len(thick)
+                     else "n/a -- every fold was thin"))
     return r
 
 if __name__ == "__main__":

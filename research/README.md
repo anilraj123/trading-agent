@@ -96,6 +96,35 @@ constituents forever" trap documented below, wearing a trailing stop.
 TRAIN but nothing in TEST, so a degenerate 2-trade test fold can post a huge
 alpha. Any future sweep must also floor the TEST trade count.
 
+## EVERY FAMILY TESTED (point-in-time, walk-forward, unbiased)
+
+Four entry signals x several exit designs. Parameters chosen on train, scored
+on unseen test, universe includes the companies the index threw away.
+
+| entry family | direction | folds positive | median alpha | trades/fold |
+|---|---|---|---|---|
+| live screen (RSI/volume/SMA breakout) | buys strength | 1/4 | −20.2% | 18–180 |
+| 6-1 / 12-1 momentum | buys strength | 1/4 | −26.4% | 16–48 |
+| live screen + pure trailing stop | buys strength | 0/4 | −35.1% | 8–43 |
+| momentum + pure trailing stop | buys strength | 1/4 | −47.2% | 22–65 |
+| **mean reversion (RSI(2) ≤ 5–15)** | **buys weakness** | **0/4** | −25.1% | 224–992 |
+| **gap fade (down-gap at the open)** | **buys weakness** | 1/4 | −23.6% | 122–1893 |
+
+The last two matter most, because they are the opposite sign to everything
+else AND they are thickly sampled — hundreds to thousands of trades per fold,
+so their failure is not a small-sample artifact the way the momentum results
+were. Short-horizon mean reversion on S&P names, the classic Connors-style
+setup, **does not work out of sample over 2020-2026.**
+
+SPY buy-and-hold beat every family, in every configuration, on unbiased data.
+
+### What this does NOT prove
+That no edge exists — only that none of the daily-bar, price-and-volume
+signal families reachable from this data beat the index after costs. Untested
+and genuinely different: intraday data, fundamentals, earnings-event drift,
+cross-sectional relative strength within sector, and position sizing / vol
+targeting (a risk rule, not a signal — the one dimension never varied here).
+
 ## THE BOTTOM LINE (point-in-time walk-forward, the only test that counts)
 
 Parameters chosen on a train window, scored on a later window never looked at,
