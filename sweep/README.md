@@ -210,3 +210,34 @@ three, because they are created first.
 Falling back to LOCAL still goes through `farm.py` (via `farmlib.Farm.local_only()`),
 so the local path keeps the same slot parallelism, retries and per-task log capture as
 the distributed one — one code path, two sizes of machine.
+
+## Nightly validation (`nightly.py`)
+
+A strategy validated once is not validated forever. `nightly.py` refetches bars,
+re-runs the walk-forward across the farm, appends the result to
+`history/nightly.jsonl`, and pushes to ntfy **only** when the out-of-sample number
+moves materially or the run fails. A daily "still losing 1.4%" notification would
+be noise, so the quiet path stays quiet.
+
+    30 2 * * 1-5   cd .../sweep && python3 nightly.py --days 90 --cost-bps 5
+
+Installed in the MSI's crontab, weeknights 02:30 local. ~90 s end to end: fetch
+(~60 s) + 28 folds on the fleet (~25 s).
+
+**Read-only by design.** It fetches market data and writes its own history file.
+It never writes to live config, never places an order, and the live trader has no
+knowledge of it. Drift detection, not optimisation — feeding a nightly best-fit back
+into live parameters is how you automate overfitting.
+
+`--drift-pp` (default 2.0) is the alert threshold against the trailing *median* of
+previous runs, not the last one, so a single noisy night does not move the baseline.
+Alerts carry direction and magnitude:
+
+    [WF] out-of-sample degraded: -1.44% vs baseline +4.50% (-5.94pp) over 28 folds, 5bps
+
+It runs on the MSI, not the droplet — the droplet is not on the tailnet and could not
+reach the farm, and the live trader has no CPU-bound work to distribute anyway
+(per-cycle it is Alpaca API calls plus LLM calls; `screen.py` is 49 lines of dict
+filtering).
+
+History and the nightly cache are gitignored: they are machine-local state.
