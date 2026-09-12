@@ -21,6 +21,18 @@ services:
       # path has never fired live; a first contract could lose 55% of a slot
       # on an analyst with no demonstrated edge. Flip to "true" to re-enable.
       V2_OPT_ENABLED: "false"
+      # 2026-09-12, user-approved on backtest evidence (research/README.md):
+      # the invalidation exit was selected OFF in 16/16 walk-forward folds
+      # across two signal families and both universes; on the biased run it
+      # was 315 trades at a 0% win rate. The -8% disaster stop is unchanged
+      # and remains the loss rail.
+      V2_INVALIDATION_EXIT_ENABLED: "false"
+      # De-risk while the strategy has no demonstrated edge. Point-in-time
+      # walk-forward puts BOTH families at 1/4 folds positive vs SPY, so full
+      # sizing is paying tuition for information we already have. 0.10 of
+      # equity per position (~$96 of $961) replaces the equal-weight
+      # capital/MAX_POSITIONS slice (~$240) as the binding constraint.
+      V2_POSITION_CAP_PCT: "0.10"
       DATA_DIR: /app/data/v2live
       NOTIFY_PROVIDER: ntfy
       NOTIFY_NTFY_TOPIC: ${V2_NTFY_TOPIC:-trading-agent}

@@ -38,6 +38,10 @@ class V2Config:
     # to guarantee a small loss (SMR: armed +3.0%, exited -0.14%). Set false to
     # restore the raw give-back without a redeploy.
     TRAIL_FLOOR_AT_ENTRY = os.getenv("V2_TRAIL_FLOOR_AT_ENTRY", "true").lower() == "true"
+    # The invalidation exit rung. Code default stays true (the historical
+    # behaviour); compose sets it false on the evidence in exit_decision's
+    # docstring. The disaster stop is untouched and remains the loss rail.
+    INVALIDATION_EXIT_ENABLED = os.getenv("V2_INVALIDATION_EXIT_ENABLED", "true").lower() == "true"
     CLOSE_WINDOW_MIN = int(os.getenv("V2_CLOSE_WINDOW_MIN", "25"))          # > cycle + runtime
 
     # --- entry hard gates (deterministic, applied to every NEW thesis) ------

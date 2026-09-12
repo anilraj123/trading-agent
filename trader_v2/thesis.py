@@ -381,19 +381,30 @@ def trail_stop_level(t: dict, trail_pct: float, floor_at_entry: bool = True):
 
 def exit_decision(t: dict, price: float, close_window: bool,
                   disaster_pct: float, trail_pct: float, today: date,
-                  trail_floor_at_entry: bool = True):
+                  trail_floor_at_entry: bool = True,
+                  invalidation_enabled: bool = True):
     """First matching exit reason for an entered thesis, or None.
 
     Precedence: disaster (every cycle) > research close > invalidation
     (close window ONLY — v1 lesson) > trailing (every cycle; realizes a locked
-    gain) > TTL (close window)."""
+    gain) > TTL (close window).
+
+    `invalidation_enabled=False` drops the invalidation rung entirely. Backtest
+    evidence (2026-09-11): across 200 configurations, two signal families and
+    both a survivorship-biased and a point-in-time universe, "invalidation off"
+    was selected in 16/16 walk-forward folds. On the biased run the rung alone
+    was 315 trades at a 0% win rate for -$22,768, and the live analyst reached
+    the same conclusion independently after SBAC's -2.39% invalidation exit
+    round-tripped straight back to entry. The disaster stop is deliberately
+    NOT affected — it stays as the loss rail.
+    """
     if t["status"] != "entered" or price is None or price <= 0:
         return None
     if t["entry_price"] and price <= t["entry_price"] * (1 + disaster_pct):
         return "disaster_stop"
     if t["pending_close"]:
         return "research_close"
-    if close_window and price <= t["invalidation_price"]:
+    if invalidation_enabled and close_window and price <= t["invalidation_price"]:
         return "invalidation"
     if t["trailing"]:
         level = trail_stop_level(t, trail_pct, trail_floor_at_entry)
