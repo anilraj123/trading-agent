@@ -184,6 +184,65 @@ class TestExitPrecedence:
         assert th.exit_decision(t, 101.0, True, -0.08, -0.03, TODAY) is None
 
 
+class TestInvalidationToggle:
+    """The invalidation rung can be switched off (V2_INVALIDATION_EXIT_ENABLED).
+    Critically, the DISASTER STOP must still fire -- it is the loss rail and
+    turning off invalidation must not leave a position unprotected."""
+
+    def test_invalidation_fires_when_enabled(self):
+        t = make_entered(100.0)                      # invalidation at 93
+        assert th.exit_decision(t, 92.5, True, -0.08, -0.03, TODAY,
+                                invalidation_enabled=True) == "invalidation"
+
+    def test_invalidation_suppressed_when_disabled(self):
+        t = make_entered(100.0)
+        assert th.exit_decision(t, 92.5, True, -0.08, -0.03, TODAY,
+                                invalidation_enabled=False) is None
+
+    def test_disaster_stop_still_fires_with_invalidation_off(self):
+        t = make_entered(100.0)
+        for cw in (True, False):
+            assert th.exit_decision(t, 92.0, cw, -0.08, -0.03, TODAY,
+                                    invalidation_enabled=False) == "disaster_stop"
+
+    def test_research_close_still_fires_with_invalidation_off(self):
+        t = make_entered(100.0, pending_close=True)
+        assert th.exit_decision(t, 92.5, True, -0.08, -0.03, TODAY,
+                                invalidation_enabled=False) == "research_close"
+
+    def test_ttl_still_fires_with_invalidation_off(self):
+        t = make_entered(100.0)
+        t["expires"] = TODAY.isoformat()
+        assert th.exit_decision(t, 101.0, True, -0.08, -0.03, TODAY,
+                                invalidation_enabled=False) == "ttl_expiry"
+
+    def test_trailing_still_fires_with_invalidation_off(self):
+        t = make_entered(100.0, trailing=True, hwm=110.0)
+        assert th.exit_decision(t, 106.6, False, -0.08, -0.03, TODAY,
+                                invalidation_enabled=False) == "trailing_stop"
+
+    def test_default_preserves_historical_behaviour(self):
+        t = make_entered(100.0)
+        assert th.exit_decision(t, 92.5, True, -0.08, -0.03, TODAY) == "invalidation"
+
+
+class TestDeriskedSizing:
+    """V2_POSITION_CAP_PCT 0.30 -> 0.10 must become the BINDING constraint,
+    not a no-op behind the equal-weight capital/MAX_POSITIONS slice."""
+
+    def test_cap_binds_below_the_equal_weight_slice(self):
+        cap, n, price = 961.0, 4, 10.0
+        old = th.position_size(cap, n, 0.30, 10_000, price, 10.0)
+        new = th.position_size(cap, n, 0.10, 10_000, price, 10.0)
+        assert old * price == pytest.approx(cap / n, abs=0.5)   # slice bound
+        assert new * price == pytest.approx(cap * 0.10, abs=0.5)  # cap bound
+        assert new < old
+
+    def test_still_clamped_by_available_cash(self):
+        assert th.position_size(961.0, 4, 0.10, 50.0, 10.0, 10.0) * 10.0 \
+            == pytest.approx(50.0 * 0.98, abs=0.5)
+
+
 class TestTrailFloorAtEntry:
     """The trail gives back 3% of the HWM, and at the +3% arming point that
     lands at entry x 1.03 x 0.97 = 0.9991 -- BELOW the entry. Arming the trail
