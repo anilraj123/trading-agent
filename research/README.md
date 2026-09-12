@@ -66,6 +66,36 @@ comparison for that reason.
 Resolving this needs point-in-time index membership (or a delisting-inclusive
 universe). Until then, no number here justifies sizing real money.
 
+## The user's design: pure trailing stop, no clock (tested 2026-09-12)
+
+"Hold while it goes up; sell when it falls X% from its peak. No time-based
+exit." Arm the trail immediately (`trail_activate_pct=0`, hwm starts at entry),
+`ttl_days=99999`, `trail_floor_at_entry=False`. **Not covered by the earlier
+sweeps**, which armed the trail at +3% or higher and paired "trail off" with a
+long TTL — close to the opposite system.
+
+| design | folds positive | median alpha |
+|---|---|---|
+| live screen + fixed-% trail | **0/4** | −35.1% |
+| momentum + fixed-% trail | 1/4 | −47.2% |
+| live screen + **ATR** trail | **0/4** | −39.1% |
+| momentum + **ATR** trail | 2/4 | +81.6% ⚠️ |
+
+The ATR trail scales the band to the stock's own daily range, since a 3%
+pullback is noise on a name that moves 3% a day and a breakdown on one that
+moves 0.8%.
+
+**⚠️ Do not trade the momentum+ATR row.** Its two winning folds are
+**10 trades** (+933% alpha) and **2 trades** (+187%), with a −67.9% max
+drawdown. A wide ATR band with no clock degenerates into buying a handful of
+names and holding them for years — statistically meaningless, and the opposite
+of the short-horizon system requested. It is the same "hold today's index
+constituents forever" trap documented below, wearing a trailing stop.
+
+**Methodology fix this exposed:** fold selection requires `n_trades >= 20` in
+TRAIN but nothing in TEST, so a degenerate 2-trade test fold can post a huge
+alpha. Any future sweep must also floor the TEST trade count.
+
 ## THE BOTTOM LINE (point-in-time walk-forward, the only test that counts)
 
 Parameters chosen on a train window, scored on a later window never looked at,

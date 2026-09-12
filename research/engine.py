@@ -34,9 +34,21 @@ def rsi_wide(close: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     return out.round(2)
 
 
+def atr_wide(frames: dict, period: int = 14) -> "pd.DataFrame":
+    """Average True Range, as a FRACTION of close — so a trail can be set in
+    units of the stock's own daily range instead of a fixed percentage that
+    is noise on a volatile name and a real breakdown on a quiet one."""
+    h, l, c = frames["high"], frames["low"], frames["close"]
+    pc = c.shift(1)
+    tr = pd.concat([(h - l).stack(), (h - pc).abs().stack(), (l - pc).abs().stack()],
+                   axis=1).max(axis=1).unstack()
+    return (tr.rolling(period).mean() / c)
+
+
 def indicators(frames: dict) -> dict:
     close, volume = frames["close"], frames["volume"]
     return {
+        "atr_pct": atr_wide(frames, 14),
         "rsi_14": rsi_wide(close, 14),
         "sma_20": close.rolling(20).mean().round(2),
         "sma_50": close.rolling(50).mean().round(2),

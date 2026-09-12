@@ -19,7 +19,8 @@ class Params:
     # exits
     disaster_stop_pct: float = -0.08       # V2_DISASTER_STOP_PCT
     trail_activate_pct: float = 0.03       # V2_TRAIL_ACTIVATE_PCT
-    trail_stop_pct: float = -0.03          # V2_TRAIL_STOP_PCT
+    trail_stop_pct: float = -0.03
+    trail_atr_mult: float = 0.0            # >0: trail = hwm - mult x ATR (overrides pct)          # V2_TRAIL_STOP_PCT
     trail_floor_at_entry: bool = True      # V2_TRAIL_FLOOR_AT_ENTRY
     ttl_days: int = 5                      # thesis TTL in trading days
     invalidation_pct: float = -0.05        # proxy for the analyst's invalidation

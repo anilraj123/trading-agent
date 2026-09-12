@@ -66,6 +66,7 @@ def run_np(A, p: Params, start_i=60, end_i=None, capital=10000.0, membership=Non
     end_i = n_d if end_i is None else min(end_i, n_d)
     o, h, l, c = A["open"], A["high"], A["low"], A["close"]
     qual = qualified_np(A, p)
+    atr = A["ind"].get("atr_pct")
     metric = A["ind"].get(p.rank_by, A["ind"]["volume_ratio"])
     sector, cost = A["sector"], p.cost_bps / 10000.0
 
@@ -91,7 +92,11 @@ def run_np(A, p: Params, start_i=60, end_i=None, capital=10000.0, membership=Non
             elif ci[j] <= e * (1 + p.invalidation_pct):
                 reason, fill = "invalidation", ci[j]
             elif trailing[j]:
-                lvl = hwm[j] * (1 + p.trail_stop_pct)
+                if p.trail_atr_mult > 0 and atr is not None and not np.isnan(atr[i, j]):
+                    # band in units of the stock's own daily range
+                    lvl = hwm[j] * (1 - p.trail_atr_mult * atr[i, j])
+                else:
+                    lvl = hwm[j] * (1 + p.trail_stop_pct)
                 if p.trail_floor_at_entry:
                     lvl = max(lvl, e)
                 if not np.isnan(li[j]) and li[j] <= lvl:
