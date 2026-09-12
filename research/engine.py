@@ -109,7 +109,7 @@ def ranked_signals(qual: pd.DataFrame, metric: pd.DataFrame):
             out[d] = []
             continue
         m = np.nan_to_num(mv[i, idx], nan=-np.inf)
-        out[d] = list(cols[idx[np.argsort(-m)]])
+        out[d] = list(cols[idx[np.argsort(-m, kind="stable")]])  # stable: volume_ratio is rounded to 2dp, so ties are common
     return out
 
 
